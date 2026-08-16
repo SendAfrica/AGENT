@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -8,15 +9,18 @@ import aiosqlite
 
 
 @dataclass
-class ConversationTurn:
-    role: str  # user | assistant
+class StoredMessage:
+    id: int
+    session_id: str
+    role: str
     content: str
-    message_id: str
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_id: str | None = None
+    created_at: str = ""
 
 
 class Store:
-    """SQLite-backed conversation memory store for SMS threads by phone number."""
+    """SQLite storage for Dashboard AI Agent chat sessions and message logs."""
 
     def __init__(self, path: str):
         self.path = path
@@ -28,24 +32,27 @@ class Store:
         await self.db.execute("PRAGMA busy_timeout=5000")
         await self.db.executescript(
             """
-            CREATE TABLE IF NOT EXISTS sms_conversations (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone       TEXT NOT NULL,
-                role        TEXT NOT NULL,
-                content     TEXT NOT NULL,
-                message_id  TEXT NOT NULL,
-                created_at  TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_sms_conversations_phone
-                ON sms_conversations (phone, created_at);
-
-            CREATE TABLE IF NOT EXISTS agent_configs (
-                phone       TEXT PRIMARY KEY,
-                mode        TEXT NOT NULL DEFAULT 'off',
-                persona     TEXT,
-                enabled     BOOLEAN NOT NULL DEFAULT 1,
+            CREATE TABLE IF NOT EXISTS agent_sessions (
+                id          TEXT PRIMARY KEY,
+                account_id  TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS agent_messages (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT NOT NULL,
+                role        TEXT NOT NULL,
+                content     TEXT NOT NULL DEFAULT '',
+                tool_calls  TEXT NOT NULL DEFAULT '[]',
+                tool_id     TEXT,
+                created_at  TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES agent_sessions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_messages_session
+                ON agent_messages (session_id, id);
             """
         )
         await self.db.commit()
@@ -53,85 +60,83 @@ class Store:
     async def close(self) -> None:
         await self.db.close()
 
-    # --- SMS Conversations ---------------------------------------------------
+    # --- Sessions -------------------------------------------------------------
 
-    async def append_turn(self, phone: str, role: str, content: str, message_id: str) -> None:
-        cur = await self.db.execute(
-            "INSERT INTO sms_conversations (phone, role, content, message_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                phone.strip().lower(),
-                role,
-                content,
-                message_id,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        await cur.close()
-        await self.db.commit()
-
-    async def get_thread(self, phone: str, limit: int = 20) -> list[ConversationTurn]:
-        cur = await self.db.execute(
-            "SELECT role, content, message_id, created_at FROM sms_conversations "
-            "WHERE phone = ? ORDER BY id DESC LIMIT ?",
-            (phone.strip().lower(), limit),
-        )
-        rows = await cur.fetchall()
-        await cur.close()
-        return [
-            ConversationTurn(
-                role=row["role"],
-                content=row["content"],
-                message_id=row["message_id"],
-                created_at=row["created_at"],
-            )
-            for row in reversed(rows)
-        ]
-
-    # --- Config Management ----------------------------------------------------
-
-    async def set_config(self, phone: str, mode: str, persona: str | None = None, enabled: bool = True) -> None:
-        await self.db.execute(
-            "INSERT INTO agent_configs (phone, mode, persona, enabled, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(phone) DO UPDATE SET "
-            "mode=excluded.mode, persona=excluded.persona, enabled=excluded.enabled, updated_at=excluded.updated_at",
-            (
-                phone.strip().lower(),
-                mode,
-                persona,
-                1 if enabled else 0,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        await self.db.commit()
-
-    async def get_config(self, phone: str) -> dict[str, Any] | None:
-        cur = await self.db.execute(
-            "SELECT phone, mode, persona, enabled FROM agent_configs WHERE phone = ?",
-            (phone.strip().lower(),),
-        )
+    async def get_or_create_session(self, session_id: str, account_id: str, user_id: str) -> str:
+        now = datetime.now(timezone.utc).isoformat()
+        cur = await self.db.execute("SELECT id FROM agent_sessions WHERE id = ?", (session_id,))
         row = await cur.fetchone()
         await cur.close()
-        if not row:
-            return None
-        return {
-            "phone": row["phone"],
-            "mode": row["mode"],
-            "persona": row["persona"],
-            "enabled": bool(row["enabled"]),
-        }
 
-    async def list_configs(self) -> list[dict[str, Any]]:
-        cur = await self.db.execute("SELECT phone, mode, persona, enabled FROM agent_configs")
+        if not row:
+            await self.db.execute(
+                "INSERT INTO agent_sessions (id, account_id, user_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, account_id, user_id, now, now),
+            )
+            await self.db.commit()
+        return session_id
+
+    # --- Messages -------------------------------------------------------------
+
+    async def append_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str = "",
+        tool_calls: list[dict[str, Any]] | None = None,
+        tool_id: str | None = None,
+    ) -> StoredMessage:
+        now = datetime.now(timezone.utc).isoformat()
+        tool_calls_json = json.dumps(tool_calls or [])
+
+        cur = await self.db.execute(
+            "INSERT INTO agent_messages (session_id, role, content, tool_calls, tool_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, role, content, tool_calls_json, tool_id, now),
+        )
+        msg_id = cur.lastrowid
+        await cur.close()
+        await self.db.execute(
+            "UPDATE agent_sessions SET updated_at = ? WHERE id = ?",
+            (now, session_id),
+        )
+        await self.db.commit()
+
+        return StoredMessage(
+            id=msg_id,
+            session_id=session_id,
+            role=role,
+            content=content,
+            tool_calls=tool_calls or [],
+            tool_id=tool_id,
+            created_at=now,
+        )
+
+    async def get_session_messages(self, session_id: str, limit: int = 50) -> list[StoredMessage]:
+        cur = await self.db.execute(
+            "SELECT id, session_id, role, content, tool_calls, tool_id, created_at "
+            "FROM agent_messages WHERE session_id = ? ORDER BY id ASC LIMIT ?",
+            (session_id, limit),
+        )
         rows = await cur.fetchall()
         await cur.close()
-        return [
-            {
-                "phone": row["phone"],
-                "mode": row["mode"],
-                "persona": row["persona"],
-                "enabled": bool(row["enabled"]),
-            }
-            for row in rows
-        ]
+
+        messages = []
+        for row in rows:
+            try:
+                tc = json.loads(row["tool_calls"]) if row["tool_calls"] else []
+            except Exception:
+                tc = []
+            messages.append(
+                StoredMessage(
+                    id=row["id"],
+                    session_id=row["session_id"],
+                    role=row["role"],
+                    content=row["content"],
+                    tool_calls=tc,
+                    tool_id=row["tool_id"],
+                    created_at=row["created_at"],
+                )
+            )
+        return messages

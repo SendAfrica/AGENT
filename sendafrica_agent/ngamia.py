@@ -6,11 +6,14 @@ from openai import AsyncOpenAI
 
 
 class NgamiaError(Exception):
-    """Raised when the Ngamia gateway rejects a chat completion."""
+    """Raised when the Ngamia gateway rejects a request."""
 
 
 class NgamiaClient:
-    """Thin wrapper over the Ngamia OpenAI-compatible gateway (https://docs.ngamia.cc)."""
+    """Wrapper over the Ngamia OpenAI-compatible gateway (https://docs.ngamia.cc).
+
+    Supports chat completion with tool calling (OpenAI wire format).
+    """
 
     def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 60.0):
         if not api_key:
@@ -25,26 +28,48 @@ class NgamiaClient:
             raise NgamiaError(f"list models failed: {exc}") from exc
         return [getattr(m, "model", None) or m.id for m in models.data]
 
-    async def complete(
+    async def chat_with_tools(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
         *,
-        max_tokens: int = 300,
-        temperature: float = 0.5,
-    ) -> str:
+        max_tokens: int = 1000,
+        temperature: float = 0.3,
+    ) -> dict[str, Any]:
+        """Execute a chat completion with optional tool definitions.
+
+        Returns a dictionary with 'content' and optional 'tool_calls'.
+        """
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
         try:
-            resp = await self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+            resp = await self._client.chat.completions.create(**kwargs)
         except Exception as exc:
             raise NgamiaError(f"chat completion failed: {exc}") from exc
-        content = resp.choices[0].message.content
-        if not content:
-            raise NgamiaError("chat completion returned an empty reply")
-        return content.strip()
+
+        choice = resp.choices[0].message
+        result: dict[str, Any] = {
+            "content": choice.content or "",
+            "tool_calls": [],
+        }
+
+        if choice.tool_calls:
+            for tc in choice.tool_calls:
+                result["tool_calls"].append({
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                })
+
+        return result
 
     async def aclose(self) -> None:
         await self._client.close()
