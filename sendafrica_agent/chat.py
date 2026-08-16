@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from .config import Settings
+from .docs import get_doc_topic, search_docs
 from .mailafrica import MailAfricaClient
 from .ngamia import NgamiaClient
 from .sendafrica import SendAfricaClient
@@ -20,6 +21,9 @@ You serve as both a knowledgeable support advisor and an action-taking agent cap
 1. PLATFORM OVERVIEW:
    - SendAfrica (https://app.sendafrica.online) is a Tanzania-first bulk SMS & messaging platform for developers and businesses.
    - MailAfrica (https://app.mailafrica.online) is a transactional and receiving email platform.
+   - Documentation & SDK Portals:
+     * REST API Docs: https://docs.sendafrica.online
+     * SDK Libraries: https://sdk.sendafrica.online (Python, Node.js/TypeScript, PHP, C#, C++, Dart)
    - API Base URLs:
      * SendAfrica API: https://api.sendafrica.online/v1
      * MailAfrica API: https://api.mailafrica.online
@@ -42,10 +46,14 @@ You serve as both a knowledgeable support advisor and an action-taking agent cap
    - Contact lists group recipients. Features include search, CSV import, and one-way Google Contacts sync.
    - Campaigns can be sent immediately or scheduled for future delivery (UTC timestamp).
 
-5. TONAL GUIDANCE:
-   - Be warm, helpful, personable, and clear. Avoid stiff corporate jargon.
-   - If asked a general question about SendAfrica/MailAfrica features, pricing, or API setup, answer directly using the knowledge base above.
-   - If asked to perform an action (check balance, send SMS, look up contacts, schedule campaign, send email), use your available tools.
+5. DOCUMENTATION & SDK ASSISTANCE:
+   - If a developer or user asks how to integrate SendAfrica, install SDKs, configure webhooks, or query endpoints, explain clearly with code samples.
+   - Use the `search_documentation` and `get_documentation_topic` tools whenever needed to pull precise docs and SDK snippets for Python, Node.js, PHP, cURL, or Webhooks.
+
+6. TONAL GUIDANCE:
+   - Be warm, helpful, personable, and concise. Avoid stiff corporate filler.
+   - If asked a general question about SendAfrica/MailAfrica features, pricing, docs, or API setup, answer directly.
+   - If asked to perform an action (check balance, send SMS, look up contacts, schedule campaign, send email), execute the corresponding tool.
 
 === SAFETY & CONFIRMATION GUARDRAILS ===
 - BULK CAMPAIGNS & MASS EMAILS:
@@ -196,11 +204,41 @@ TOOL_SCHEMAS = [
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    # ---- Documentation & SDK Tools (docs.sendafrica.online & sdk.sendafrica.online) ----
+    {
+        "type": "function",
+        "function": {
+            "name": "search_documentation",
+            "description": "Search docs.sendafrica.online REST API and sdk.sendafrica.online SDK resources.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Topic or keyword e.g. 'python', 'webhook', 'send sms'"},
+                    "target": {"type": "string", "description": "all, docs.sendafrica.online, or sdk.sendafrica.online"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_documentation_topic",
+            "description": "Get detailed documentation, code examples, and setup guide for a topic_id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic_id": {"type": "string", "description": "Topic ID e.g. 'python_sdk', 'sms_send', 'webhooks'"}
+                },
+                "required": ["topic_id"],
+            },
+        },
+    },
 ]
 
 
 class ChatRunner:
-    """Orchestrates multi-turn chat sessions with tool calling and safety guardrails across SMS & Email."""
+    """Orchestrates multi-turn chat sessions with tool calling and safety guardrails across SMS, Email & Docs."""
 
     def __init__(
         self,
@@ -315,10 +353,19 @@ class ChatRunner:
     async def _execute_tool(
         self, tool_name: str, args: dict[str, Any], user_confirmation: bool
     ) -> tuple[dict[str, Any], bool]:
-        """Execute SMS or Email tool with guardrail check."""
+        """Execute SMS, Email, or Documentation tool with guardrail check."""
         try:
+            # ---- Documentation & SDK Tools ----------------------------------
+            if tool_name == "search_documentation":
+                res = search_docs(args["query"], target=args.get("target", "all"))
+                return {"results": res}, False
+
+            elif tool_name == "get_documentation_topic":
+                res = get_doc_topic(args["topic_id"])
+                return res, False
+
             # ---- SendAfrica Tools -------------------------------------------
-            if tool_name == "get_account_balance":
+            elif tool_name == "get_account_balance":
                 res = await self.sendafrica.get_balance()
                 return res, False
 

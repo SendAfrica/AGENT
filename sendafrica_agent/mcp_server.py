@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from .agent import Agent
 from .chat import ChatRunner
 from .config import Settings
+from .docs import get_doc_topic, search_docs
 from .mailafrica import MailAfricaClient
 from .ngamia import NgamiaClient
 from .sendafrica import SendAfricaClient
@@ -121,6 +122,18 @@ def build_server(runtime: Runtime) -> FastMCP:
     async def get_email_balance() -> dict[str, Any]:
         """Get MailAfrica email balance and credit ledger."""
         return await mailafrica.balance()
+
+    # ---- Documentation & SDK Tools (docs.sendafrica.online & sdk.sendafrica.online) ----
+
+    @mcp.tool()
+    async def search_documentation(query: str, target: str = "all") -> list[dict[str, Any]]:
+        """Search documentation and SDK resources for docs.sendafrica.online and sdk.sendafrica.online."""
+        return search_docs(query, target=target)
+
+    @mcp.tool()
+    async def get_documentation_topic(topic_id: str) -> dict[str, Any]:
+        """Fetch full documentation content, endpoints, and code examples for a specific topic."""
+        return get_doc_topic(topic_id)
 
     # ---- Gateway Tools ------------------------------------------------------
 

@@ -71,6 +71,12 @@ An in-app **Multi-Channel AI Assistant** and **FastMCP Server** for [SendAfrica]
 | `send_sms` | `to, message` | Send a single SMS message |
 | `create_campaign` | `name, message, contact_group_id` | Schedule bulk SMS campaign (Guardrail checked) |
 
+### Documentation & SDK Tools (`docs.sendafrica.online` & `sdk.sendafrica.online`)
+| Tool Name | Parameters | Description |
+|---|---|---|
+| `search_documentation` | `query, target="all"` | Search REST API docs and SDK code samples |
+| `get_documentation_topic` | `topic_id` | Fetch full documentation guide & SDK code snippets |
+
 ### Email Tools (MailAfrica)
 | Tool Name | Parameters | Description |
 |---|---|---|
