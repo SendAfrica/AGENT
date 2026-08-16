@@ -7,6 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -35,6 +36,15 @@ def create_app(settings: Settings) -> FastAPI:
         await runtime.aclose()
 
     app = FastAPI(title="SendAfrica Agent & Dashboard Assistant", lifespan=lifespan)
+
+    # Enable CORS for dashboard UI integration
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     # Mount FastMCP SSE App (serves /sse and /messages)
     app.mount("/sse", mcp_server.sse_app())

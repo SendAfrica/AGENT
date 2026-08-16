@@ -80,7 +80,17 @@ class SendAfricaClient:
         payload: dict[str, Any] = {"to": to, "message": message}
         if sender_id:
             payload["sender_id"] = sender_id
-        res = await self._request("POST", "/sms", json=payload)
+
+        auth_header = self._client.headers.get("Authorization", "")
+        endpoint = "/sms/send" if "Bearer eyJ" in auth_header else "/sms"
+        try:
+            res = await self._request("POST", endpoint, json=payload)
+        except SendAfricaError as err:
+            if err.status in (401, 404) and endpoint == "/sms":
+                res = await self._request("POST", "/sms/send", json=payload)
+            else:
+                raise err
+
         return res if isinstance(res, dict) else {"result": res}
 
     async def send_bulk_sms(
