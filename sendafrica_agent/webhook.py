@@ -64,9 +64,10 @@ def create_app(settings: Settings) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.post("/v1/agent/chat")
+    @app.api_route("/v1/agent/chat", methods=["POST", "OPTIONS"])
     async def dashboard_chat(
-        req: ChatRequest,
+        request: Request,
+        req: ChatRequest | None = None,
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None),
         x_account_id: str | None = Header(default="default_account"),
@@ -77,6 +78,22 @@ def create_app(settings: Settings) -> FastAPI:
         Accepts user chat input, maintains session history, executes MCP tools
         via Ngamia LLM tool-calling loop, and returns response or safety confirmation requests.
         """
+        cors_headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+
+        if request.method == "OPTIONS":
+            return JSONResponse({"status": "ok"}, headers=cors_headers)
+
+        if req is None:
+            try:
+                body = await request.json()
+                req = ChatRequest(**body)
+            except Exception as e:
+                return JSONResponse({"error": "Invalid request body"}, status_code=400, headers=cors_headers)
+
         api_key = x_api_key or (authorization.replace("Bearer ", "") if authorization else None)
 
         # Update client auth if dynamic key provided
@@ -92,10 +109,10 @@ def create_app(settings: Settings) -> FastAPI:
                 message_text=req.message,
                 user_confirmation=req.user_confirmation,
             )
-            return JSONResponse(res)
+            return JSONResponse(res, headers=cors_headers)
         except Exception as exc:
             logger.exception("dashboard chat failed for session %s", req.session_id)
-            return JSONResponse({"error": str(exc)}, status_code=500)
+            return JSONResponse({"error": str(exc)}, status_code=500, headers=cors_headers)
 
     @app.post("/webhooks/sendafrica")
     async def sendafrica_webhook(request: Request) -> JSONResponse:
