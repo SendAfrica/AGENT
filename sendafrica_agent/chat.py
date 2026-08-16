@@ -136,6 +136,29 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "send_bulk_sms",
+            "description": "Send an SMS message to 2 or more recipient phone numbers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipients": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of recipient phone numbers e.g. ['0712345678', '0787654321']",
+                    },
+                    "message": {"type": "string", "description": "SMS message text"},
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Must be True if sending to more than 10 recipients",
+                    },
+                },
+                "required": ["recipients", "message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_campaign",
             "description": "Create and schedule a bulk SMS campaign.",
             "parameters": {
@@ -384,6 +407,22 @@ class ChatRunner:
 
             elif tool_name == "send_sms":
                 res = await self.sendafrica.send_sms(to=args["to"], message=args["message"])
+                return res, False
+
+            elif tool_name == "send_bulk_sms":
+                recipients = args.get("recipients") or []
+                if len(recipients) > 10 and not user_confirmation and not args.get("confirmed"):
+                    return (
+                        {
+                            "status": "confirmation_required",
+                            "action": "send_bulk_sms",
+                            "recipients_count": len(recipients),
+                            "message": args.get("message"),
+                            "notice": f"Sending SMS to {len(recipients)} numbers requires explicit confirmation.",
+                        },
+                        True,
+                    )
+                res = await self.sendafrica.send_bulk_sms(recipients=recipients, message=args["message"])
                 return res, False
 
             elif tool_name == "create_campaign":

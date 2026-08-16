@@ -72,6 +72,11 @@ def build_server(runtime: Runtime) -> FastMCP:
         return await sendafrica.send_sms(to, message, sender_id=sender_id or None)
 
     @mcp.tool()
+    async def send_bulk_sms(recipients: list[str], message: str, sender_id: str = "") -> dict[str, Any]:
+        """Send bulk SMS to multiple recipient phone numbers."""
+        return await sendafrica.send_bulk_sms(recipients, message, sender_id=sender_id or None)
+
+    @mcp.tool()
     async def get_delivery_status(message_id: str = "") -> dict[str, Any]:
         """Check delivery status of sent SMS messages."""
         logs = await sendafrica.list_sms_logs(limit=10)
