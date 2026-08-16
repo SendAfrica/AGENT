@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .config import Settings
-from .mcp_server import Runtime
+from .mcp_server import Runtime, build_server
 
 logger = logging.getLogger("sendafrica_agent.webhook")
 
@@ -26,6 +26,7 @@ class ChatRequest(BaseModel):
 
 def create_app(settings: Settings) -> FastAPI:
     runtime = Runtime(settings)
+    mcp_server = build_server(runtime)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -34,6 +35,9 @@ def create_app(settings: Settings) -> FastAPI:
         await runtime.aclose()
 
     app = FastAPI(title="SendAfrica Agent & Dashboard Assistant", lifespan=lifespan)
+
+    # Mount FastMCP SSE App (serves /sse and /messages)
+    app.mount("/sse", mcp_server.sse_app())
 
     @app.get("/health")
     async def health() -> dict[str, str]:

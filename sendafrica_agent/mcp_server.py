@@ -11,6 +11,7 @@ warnings.filterwarnings(
 )
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .agent import Agent
 from .chat import ChatRunner
@@ -58,7 +59,8 @@ def build_server(runtime: Runtime) -> FastMCP:
         finally:
             await runtime.aclose()
 
-    mcp = FastMCP("camel-assistant", lifespan=lifespan)
+    ts = TransportSecuritySettings(allowed_hosts=["*"], allowed_origins=["*"])
+    mcp = FastMCP("camel-assistant", lifespan=lifespan, transport_security=ts)
     sendafrica = runtime.sendafrica
     mailafrica = runtime.mailafrica
     ngamia = runtime.ngamia
