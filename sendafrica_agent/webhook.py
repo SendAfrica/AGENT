@@ -94,12 +94,15 @@ def create_app(settings: Settings) -> FastAPI:
             "Access-Control-Allow-Headers": "*",
         }
 
-        api_key = x_api_key or (authorization.replace("Bearer ", "") if authorization else None)
+        original_sa_key = runtime.sendafrica._client.headers.get("X-API-Key")
+        original_sa_auth = runtime.sendafrica._client.headers.get("Authorization")
 
-        # Update client auth if dynamic key provided
-        if api_key:
-            runtime.sendafrica._client.headers["Authorization"] = f"Bearer {api_key}"
-            runtime.sendafrica._client.headers["X-API-Key"] = api_key
+        dynamic_key = x_api_key or (authorization.replace("Bearer ", "") if authorization else None)
+
+        # Only apply dynamic key if valid SendAfrica API Key prefix
+        if dynamic_key and dynamic_key.startswith("SA-"):
+            runtime.sendafrica._client.headers["X-API-Key"] = dynamic_key
+            runtime.sendafrica._client.headers["Authorization"] = f"Bearer {dynamic_key}"
 
         try:
             res = await runtime.chat.handle_user_message(
@@ -113,6 +116,11 @@ def create_app(settings: Settings) -> FastAPI:
         except Exception as exc:
             logger.exception("dashboard chat failed for session %s", req.session_id)
             return JSONResponse({"error": str(exc)}, status_code=500, headers=cors_headers)
+        finally:
+            if original_sa_key:
+                runtime.sendafrica._client.headers["X-API-Key"] = original_sa_key
+            if original_sa_auth:
+                runtime.sendafrica._client.headers["Authorization"] = original_sa_auth
 
     @app.post("/webhooks/sendafrica")
     async def sendafrica_webhook(request: Request) -> JSONResponse:
