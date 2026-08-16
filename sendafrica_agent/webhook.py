@@ -99,10 +99,14 @@ def create_app(settings: Settings) -> FastAPI:
 
         dynamic_key = x_api_key or (authorization.replace("Bearer ", "") if authorization else None)
 
-        # Only apply dynamic key if valid SendAfrica API Key prefix
-        if dynamic_key and dynamic_key.startswith("SA-"):
-            runtime.sendafrica._client.headers["X-API-Key"] = dynamic_key
-            runtime.sendafrica._client.headers["Authorization"] = f"Bearer {dynamic_key}"
+        # Apply client credentials (either SA- API key or logged-in JWT session token)
+        if dynamic_key:
+            if dynamic_key.startswith("SA-"):
+                runtime.sendafrica._client.headers["X-API-Key"] = dynamic_key
+                runtime.sendafrica._client.headers["Authorization"] = f"Bearer {dynamic_key}"
+            elif dynamic_key.startswith("eyJ"):
+                runtime.sendafrica._client.headers["Authorization"] = f"Bearer {dynamic_key}"
+                runtime.sendafrica._client.headers.pop("X-API-Key", None)
 
         try:
             res = await runtime.chat.handle_user_message(
@@ -119,8 +123,13 @@ def create_app(settings: Settings) -> FastAPI:
         finally:
             if original_sa_key:
                 runtime.sendafrica._client.headers["X-API-Key"] = original_sa_key
+            else:
+                runtime.sendafrica._client.headers.pop("X-API-Key", None)
+
             if original_sa_auth:
                 runtime.sendafrica._client.headers["Authorization"] = original_sa_auth
+            else:
+                runtime.sendafrica._client.headers.pop("Authorization", None)
 
     @app.post("/webhooks/sendafrica")
     async def sendafrica_webhook(request: Request) -> JSONResponse:
