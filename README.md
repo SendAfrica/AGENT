@@ -1,74 +1,129 @@
-# SendAfrica Agent
+# SendAfrica & MailAfrica Agent (`SendAfrica-Agent`)
 
-Model Context Protocol (MCP) server & automated SMS auto-reply agent for the [SendAfrica API](https://api.sendafrica.online).
-
-Provides:
-- **MCP Server** (`sendafrica-agent mcp`): Exposes FastMCP tools to AI assistants for SMS sending, contact management, campaign scheduling, credit accounting, and top-ups.
-- **Webhook Auto-Reply Server** (`sendafrica-agent serve`): FastAPI endpoint (`POST /webhooks/sendafrica`) that receives inbound SMS, maintains turn-by-turn thread context in SQLite, and generates AI responses using the Ngamia LLM gateway.
+An in-app **Multi-Channel AI Assistant** and **FastMCP Server** for [SendAfrica](https://app.sendafrica.online) (SMS) and [MailAfrica](https://app.mailafrica.online) (Transactional Email).
 
 ---
 
-## Quick Start
+## Features
 
-### 1. Configuration
-Copy `.env.example` to `.env` and fill in credentials:
+- **In-App Dashboard Assistant (`POST /v1/agent/chat`)**:
+  - Embedded directly inside the SendAfrica web dashboard chat widget.
+  - Serves as a **knowledgeable support chatbot** (answers questions about pricing, API keys, Snippe top-ups, contacts, and delivery rules).
+  - Serves as an **action-taking agent** executing FastMCP tools on behalf of authenticated business users.
+- **FastMCP Tool Server (`sendafrica-agent mcp`)**:
+  - Exposes FastMCP tools for AI assistants (Claude, Cursor, Gemini, custom agents).
+- **Safety Guardrails (Confirm-Before-Send)**:
+  - Requires explicit user confirmation before executing bulk SMS campaigns or mass email dispatches to prevent unintended blasts.
+- **Multi-Channel Synergy**:
+  - Manages both **SMS** (SendAfrica) and **Email** (MailAfrica) through a unified tool-calling interface powered by the **Ngamia AI Gateway** (`api.ngamia.cc/v1`).
 
+---
+
+## System Architecture
+
+```
+┌────────────────────────────────────────────────────────┐
+│               SendAfrica Web Dashboard                 │
+│         (In-app Chat Widget at /admin or /app)          │
+└──────────────────────────┬─────────────────────────────┘
+                           │ POST /v1/support/chat
+                           ▼
+┌────────────────────────────────────────────────────────┐
+│               SendAfrica Go Core API                   │
+│             (https://api.sendafrica.online)            │
+└──────────────────────────┬─────────────────────────────┘
+                           │ Proxy to AGENT_SERVICE_URL
+                           ▼
+┌────────────────────────────────────────────────────────┐
+│             SendAfrica Agent Service                   │
+│  - Session History (agent_sessions / agent_messages)   │
+│  - Knowledge Base System Prompt Resource               │
+│  - Tool-Calling Loop with Ngamia LLM Gateway           │
+│  - Safety Guardrail (Confirm-Before-Send)              │
+└──────────────┬──────────────────────────┬──────────────┘
+               │                          │
+               │ FastMCP Tool Execution   │ Ngamia Chat Completions
+               ▼                          ▼
+┌─────────────────────────────┐  ┌─────────────────────────┐
+│     FastMCP Server Tools    │  │   Ngamia AI Gateway     │
+│   (SendAfrica & MailAfrica) │  │  (api.ngamia.cc/v1)     │
+└──────────────┬──────────────┘  └─────────────────────────┘
+               │
+      ┌────────┴────────┐
+      ▼                 ▼
+┌──────────┐      ┌──────────┐
+│SendAfrica│      │MailAfrica│
+│ Go Core  │      │   API    │
+└──────────┘      └──────────┘
+```
+
+---
+
+## FastMCP Tools Offered
+
+### SMS Tools (SendAfrica)
+| Tool Name | Parameters | Description |
+|---|---|---|
+| `get_account_balance` | None | Check SendAfrica SMS credit balance |
+| `get_usage_summary` | `period="this_month"` | Summarize sent/delivered/failed SMS |
+| `list_contacts` | `list_id="1", query=""` | Search/list contacts in phonebook |
+| `get_delivery_status` | `message_id=""` | Query delivery status logs |
+| `send_sms` | `to, message` | Send a single SMS message |
+| `create_campaign` | `name, message, contact_group_id` | Schedule bulk SMS campaign (Guardrail checked) |
+
+### Email Tools (MailAfrica)
+| Tool Name | Parameters | Description |
+|---|---|---|
+| `send_email` | `to: list[str], subject, body, from_address` | Send transactional email (Guardrail checked) |
+| `list_inbound_emails` | `address_id=1, limit=20` | List received inbound emails |
+| `get_email_balance` | None | Check MailAfrica wallet & credit balance |
+
+---
+
+## Embedded Knowledge Base Resource
+
+The agent is pre-loaded with comprehensive knowledge regarding:
+1. **SendAfrica Core**: Platform app (`app.sendafrica.online`), REST API (`api.sendafrica.online/v1`), and API key format (`SA-...`).
+2. **MailAfrica Core**: Platform app (`app.mailafrica.online`), REST API (`api.mailafrica.online`), and API key format (`MA-...`).
+3. **Pay-As-You-Go Voucher Rates (TZS)**:
+   - Tier 1 (1,000 to 49,999 TZS): **35 TZS / credit**
+   - Tier 2 (50,000 to 149,999 TZS): **32 TZS / credit**
+   - Tier 3 (150,000 TZS and above): **30 TZS / credit**
+4. **Mobile Money Top-Ups**: Snippe integration for M-Pesa, Tigo Pesa, Airtel Money, Halopesa, and manual bank transfers.
+5. **Phonebook & Sync**: Contact list grouping, CSV imports, and Google Contacts one-way sync.
+
+---
+
+## Setup & Running
+
+### 1. Configure Environment (`.env`)
 ```bash
 cp .env.example .env
 ```
 
-Key environment variables:
-- `SENDAFRICA_API_BASE`: `https://api.sendafrica.online/v1`
-- `SENDAFRICA_API_KEY`: Your SendAfrica API key (`SA-...`)
-- `NGAMIA_BASE_URL`: `https://api.ngamia.cc/v1`
-- `NGAMIA_API_KEY`: Ngamia API key (`ngm_...`)
-- `NGAMIA_MODEL`: `openai/gpt-4o-mini`
+Set key credentials:
+```ini
+SENDAFRICA_API_BASE=https://api.sendafrica.online/v1
+SENDAFRICA_API_KEY=SA-your-key-here
 
----
+MAILAFRICA_API_BASE=https://api.mailafrica.online
+MAILAFRICA_API_KEY=MA-your-key-here
 
-## Usage
-
-### Run as MCP Server (Stdio)
-For integration with AI assistants (Claude Desktop, Cursor, Gemini, etc.):
-
-```bash
-uv run sendafrica-agent mcp
-# or
-python -m sendafrica_agent mcp
+NGAMIA_BASE_URL=https://api.ngamia.cc/v1
+NGAMIA_API_KEY=ngm_your_key_here
+NGAMIA_MODEL=openai/gpt-4o-mini
 ```
 
-### Run HTTP Webhook Server (FastAPI / Uvicorn)
-To listen for inbound SMS webhooks:
-
+### 2. Run Assistant Webhook Server
 ```bash
 uv run sendafrica-agent serve
-# or
-python -m sendafrica_agent serve
+# Starts FastAPI server on http://0.0.0.0:8000
 ```
 
----
-
-## MCP Tools Offered
-
-| Category | Tool | Description |
-|---|---|---|
-| **SMS** | `send_sms` | Send single SMS |
-| **SMS** | `send_bulk_sms` | Send bulk SMS |
-| **SMS** | `get_sms_logs` | Fetch SMS status logs |
-| **Credits** | `get_credit_balance` | Check current credit balance |
-| **Credits** | `get_credit_history` | Ledger transaction history |
-| **Credits** | `get_voucher_rate` | Pay-as-you-go voucher pricing tiers |
-| **Contacts** | `list_contact_lists` | List contact lists |
-| **Contacts** | `create_contact_list` | Create contact list |
-| **Contacts** | `list_contacts` | List contacts in list |
-| **Contacts** | `create_contact` | Add contact to list |
-| **Campaigns**| `list_campaigns` | List SMS campaigns |
-| **Campaigns**| `create_campaign` | Schedule bulk SMS campaign |
-| **Campaigns**| `get_campaign` | Get campaign details & recipient stats |
-| **Payments** | `initiate_payment` | Mobile money top-up (Snippe/manual) |
-| **Agent** | `agent_config` | Configure SMS auto-reply mode/persona per phone |
-| **Agent** | `agent_handle_sms` | Test inbound SMS auto-reply pipeline |
-| **Agent** | `list_models` | List LLM models from Ngamia gateway |
+### 3. Run as Stdio MCP Server
+```bash
+uv run sendafrica-agent mcp
+```
 
 ---
 
