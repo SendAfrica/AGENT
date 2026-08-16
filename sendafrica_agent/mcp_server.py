@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from .agent import Agent
 from .chat import ChatRunner
 from .config import Settings
+from .mailafrica import MailAfricaClient
 from .ngamia import NgamiaClient
 from .sendafrica import SendAfricaClient
 from .store import Store
@@ -23,15 +24,16 @@ MODES = ("auto", "draft", "off")
 
 
 class Runtime:
-    """Shared component container for MCP server and Webhook HTTP app."""
+    """Shared component container for MCP server and Webhook HTTP app across SMS & Email."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.sendafrica = SendAfricaClient(settings.sendafrica_api_base, settings.sendafrica_api_key)
+        self.mailafrica = MailAfricaClient(settings.mailafrica_api_base, settings.mailafrica_api_key)
         self.ngamia = NgamiaClient(settings.ngamia_base_url, settings.ngamia_api_key, settings.ngamia_model)
         self.store = Store(str(settings.db_path))
         self.agent = Agent(settings, self.sendafrica, self.ngamia, self.store)
-        self.chat = ChatRunner(settings, self.sendafrica, self.ngamia, self.store)
+        self.chat = ChatRunner(settings, self.sendafrica, self.mailafrica, self.ngamia, self.store)
         self._connected = False
 
     async def connect(self) -> None:
@@ -42,6 +44,7 @@ class Runtime:
         if self._connected:
             await self.store.close()
         await self.sendafrica.aclose()
+        await self.mailafrica.aclose()
         await self.ngamia.aclose()
 
 
@@ -54,21 +57,22 @@ def build_server(runtime: Runtime) -> FastMCP:
         finally:
             await runtime.aclose()
 
-    mcp = FastMCP("sendafrica-agent", lifespan=lifespan)
+    mcp = FastMCP("camel-assistant", lifespan=lifespan)
     sendafrica = runtime.sendafrica
+    mailafrica = runtime.mailafrica
     ngamia = runtime.ngamia
     store = runtime.store
 
-    # ---- SendAfrica Dashboard Tool Surface (v1) ------------------------------
+    # ---- SendAfrica Dashboard Tool Surface (SMS) -----------------------------
 
     @mcp.tool()
     async def send_sms(to: str, message: str, sender_id: str = "") -> dict[str, Any]:
-        """Send a single SMS to a recipient."""
+        """Send a single SMS to a recipient via SendAfrica."""
         return await sendafrica.send_sms(to, message, sender_id=sender_id or None)
 
     @mcp.tool()
     async def get_delivery_status(message_id: str = "") -> dict[str, Any]:
-        """Check delivery status of sent messages."""
+        """Check delivery status of sent SMS messages."""
         logs = await sendafrica.list_sms_logs(limit=10)
         return {"logs": logs}
 
@@ -81,7 +85,7 @@ def build_server(runtime: Runtime) -> FastMCP:
     async def create_campaign(
         name: str, message: str, contact_group_id: str, scheduled_at: str = ""
     ) -> dict[str, Any]:
-        """Create and schedule a bulk campaign."""
+        """Create and schedule a bulk SMS campaign."""
         return await sendafrica.create_campaign(
             name, contact_group_id, message, scheduled_at=scheduled_at or None
         )
@@ -96,6 +100,29 @@ def build_server(runtime: Runtime) -> FastMCP:
         """Summarize SMS sent, delivered, failed for a period."""
         logs = await sendafrica.list_sms_logs(limit=50)
         return {"period": period, "total_sent": len(logs), "recent_logs": logs[:5]}
+
+    # ---- MailAfrica Dashboard Tool Surface (Email - Phase 2) -----------------
+
+    @mcp.tool()
+    async def send_email(
+        to: list[str], subject: str, body: str, from_address: str = ""
+    ) -> dict[str, Any]:
+        """Send a transactional email through MailAfrica."""
+        return await mailafrica.send_email(
+            to=to, subject=subject, text_body=body, from_address=from_address or None
+        )
+
+    @mcp.tool()
+    async def list_inbound_emails(address_id: int = 1, limit: int = 20) -> list[dict[str, Any]]:
+        """List received inbound emails for a MailAfrica receiving address."""
+        return await mailafrica.list_messages(address_id=address_id, limit=limit)
+
+    @mcp.tool()
+    async def get_email_balance() -> dict[str, Any]:
+        """Get MailAfrica email balance and credit ledger."""
+        return await mailafrica.balance()
+
+    # ---- Gateway Tools ------------------------------------------------------
 
     @mcp.tool()
     async def list_models() -> list[str]:

@@ -5,30 +5,31 @@ import logging
 from typing import Any
 
 from .config import Settings
+from .mailafrica import MailAfricaClient
 from .ngamia import NgamiaClient
 from .sendafrica import SendAfricaClient
 from .store import Store
 
 logger = logging.getLogger("sendafrica_agent.chat")
 
-SENDAFRICA_AGENT_SYSTEM_PROMPT = """You are the SendAfrica Assistant — an intelligent in-app assistant embedded in the SendAfrica business dashboard.
-Your goal is to help business owners manage SMS campaigns, check credit balances, look up delivery status, and search contacts.
+SENDAFRICA_AGENT_SYSTEM_PROMPT = """You are the Multi-Channel Assistant for SendAfrica (SMS) & MailAfrica (Email) — an intelligent in-app assistant embedded in the business dashboard.
+Your goal is to help business owners manage SMS campaigns, send emails, check credit/wallet balances, look up delivery status, and search contacts.
 
 IMPORTANT RULES & GUARDRAILS:
 1. You can ONLY perform actions on behalf of the authenticated account.
 2. Keep responses helpful, professional, and clear.
-3. BULK CAMPAIGNS & MASS SMS GUARDRAIL:
-   - Before executing bulk SMS sends or scheduling mass campaigns, you MUST describe the planned action clearly (recipient count, message, cost) and ask the user to confirm.
+3. BULK CAMPAIGNS & MASS SMS/EMAIL GUARDRAIL:
+   - Before executing bulk SMS sends, scheduling mass campaigns, or sending mass emails, you MUST describe the planned action clearly (recipient count, message, subject) and ask the user to confirm.
    - If the action requires user confirmation and hasn't been confirmed yet, inform the user clearly and wait for their explicit confirmation.
 """
 
-# Available tool schemas formatted for OpenAI tool calling spec
 TOOL_SCHEMAS = [
+    # ---- SMS Tools (SendAfrica) ---------------------------------------------
     {
         "type": "function",
         "function": {
             "name": "get_account_balance",
-            "description": "Check current SMS credit and wallet balance for the account.",
+            "description": "Check current SMS credit and wallet balance for SendAfrica.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -69,7 +70,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_delivery_status",
-            "description": "Fetch delivery status for a specific message ID.",
+            "description": "Fetch delivery status for a specific SMS message ID.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -114,15 +115,74 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    # ---- Email Tools (MailAfrica - Phase 2) ----------------------------------
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Send a transactional email through MailAfrica.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of recipient email addresses",
+                    },
+                    "subject": {"type": "string", "description": "Email subject line"},
+                    "body": {"type": "string", "description": "Email body content (text/markdown)"},
+                    "from_address": {
+                        "type": "string",
+                        "description": "Sender address e.g. support@domain.com",
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Must be True if sending to > 5 recipients",
+                    },
+                },
+                "required": ["to", "subject", "body"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_inbound_emails",
+            "description": "List received inbound emails for a MailAfrica receiving address.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "address_id": {"type": "integer", "description": "Inbound address ID (default 1)"}
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_email_balance",
+            "description": "Check MailAfrica email balance and credit ledger.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 
 
 class ChatRunner:
-    """Orchestrates multi-turn chat sessions with tool calling and safety guardrails."""
+    """Orchestrates multi-turn chat sessions with tool calling and safety guardrails across SMS & Email."""
 
-    def __init__(self, settings: Settings, sendafrica: SendAfricaClient, ngamia: NgamiaClient, store: Store):
+    def __init__(
+        self,
+        settings: Settings,
+        sendafrica: SendAfricaClient,
+        mailafrica: MailAfricaClient,
+        ngamia: NgamiaClient,
+        store: Store,
+    ):
         self.settings = settings
         self.sendafrica = sendafrica
+        self.mailafrica = mailafrica
         self.ngamia = ngamia
         self.store = store
 
@@ -137,7 +197,6 @@ class ChatRunner:
         await self.store.get_or_create_session(session_id, account_id, user_id)
         await self.store.append_message(session_id, role="user", content=message_text)
 
-        # Build message context for LLM
         history = await self.store.get_session_messages(session_id, limit=30)
         messages_payload: list[dict[str, Any]] = [
             {"role": "system", "content": SENDAFRICA_AGENT_SYSTEM_PROMPT}
@@ -176,7 +235,6 @@ class ChatRunner:
                 await self.store.append_message(session_id, role="assistant", content=content)
                 break
 
-            # Record assistant turn with tool calls
             await self.store.append_message(
                 session_id, role="assistant", content=content, tool_calls=tool_calls
             )
@@ -193,7 +251,6 @@ class ChatRunner:
                 ],
             })
 
-            # Execute requested tools
             for tc in tool_calls:
                 tool_id = tc["id"]
                 tool_name = tc["name"]
@@ -228,8 +285,9 @@ class ChatRunner:
     async def _execute_tool(
         self, tool_name: str, args: dict[str, Any], user_confirmation: bool
     ) -> tuple[dict[str, Any], bool]:
-        """Execute tool or return safety confirmation guardrail block."""
+        """Execute SMS or Email tool with guardrail check."""
         try:
+            # ---- SendAfrica Tools -------------------------------------------
             if tool_name == "get_account_balance":
                 res = await self.sendafrica.get_balance()
                 return res, False
@@ -253,7 +311,6 @@ class ChatRunner:
 
             elif tool_name == "create_campaign":
                 if not user_confirmation and not args.get("confirmed"):
-                    # Safety Guardrail Triggered!
                     return (
                         {
                             "status": "confirmation_required",
@@ -265,12 +322,42 @@ class ChatRunner:
                         },
                         True,
                     )
-
                 res = await self.sendafrica.create_campaign(
                     name=args["name"],
                     contact_list_id=args["contact_list_id"],
                     message=args["message"],
                 )
+                return res, False
+
+            # ---- MailAfrica Tools (Phase 2) ----------------------------------
+            elif tool_name == "send_email":
+                recipients = args.get("to") or []
+                if len(recipients) > 5 and not user_confirmation and not args.get("confirmed"):
+                    return (
+                        {
+                            "status": "confirmation_required",
+                            "action": "send_email",
+                            "recipients": recipients,
+                            "subject": args.get("subject"),
+                            "notice": f"Sending email to {len(recipients)} recipients requires explicit user confirmation.",
+                        },
+                        True,
+                    )
+                res = await self.mailafrica.send_email(
+                    to=recipients,
+                    subject=args["subject"],
+                    text_body=args.get("body"),
+                    from_address=args.get("from_address"),
+                )
+                return res, False
+
+            elif tool_name == "list_inbound_emails":
+                addr_id = int(args.get("address_id") or 1)
+                res = await self.mailafrica.list_messages(address_id=addr_id, limit=20)
+                return {"messages": res}, False
+
+            elif tool_name == "get_email_balance":
+                res = await self.mailafrica.balance()
                 return res, False
 
             else:
