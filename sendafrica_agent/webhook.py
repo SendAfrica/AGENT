@@ -64,35 +64,35 @@ def create_app(settings: Settings) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.api_route("/v1/agent/chat", methods=["POST", "OPTIONS"])
+    @app.options("/v1/agent/chat")
+    async def dashboard_chat_options() -> JSONResponse:
+        return JSONResponse(
+            {"status": "ok"},
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
+                "Access-Control-Allow-Headers": "*",
+            },
+        )
+
+    @app.post("/v1/agent/chat")
     async def dashboard_chat(
-        request: Request,
-        req: ChatRequest | None = None,
+        req: ChatRequest,
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None),
         x_account_id: str | None = Header(default="default_account"),
         x_user_id: str | None = Header(default="default_user"),
     ) -> JSONResponse:
-        """Endpoint consumed by SendAfrica Dashboard Chat Widget.
+        """Endpoint consumed by SendAfrica & MailAfrica Dashboard Chat Widgets & Assistant Pages.
 
         Accepts user chat input, maintains session history, executes MCP tools
         via Ngamia LLM tool-calling loop, and returns response or safety confirmation requests.
         """
         cors_headers = {
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
             "Access-Control-Allow-Headers": "*",
         }
-
-        if request.method == "OPTIONS":
-            return JSONResponse({"status": "ok"}, headers=cors_headers)
-
-        if req is None:
-            try:
-                body = await request.json()
-                req = ChatRequest(**body)
-            except Exception as e:
-                return JSONResponse({"error": "Invalid request body"}, status_code=400, headers=cors_headers)
 
         api_key = x_api_key or (authorization.replace("Bearer ", "") if authorization else None)
 
