@@ -49,6 +49,17 @@ def create_app(settings: Settings) -> FastAPI:
     # Mount FastMCP SSE App (serves /sse and /messages)
     app.mount("/sse", mcp_server.sse_app())
 
+    @app.options("/{full_path:path}")
+    async def options_handler(full_path: str):
+        return JSONResponse(
+            content={"status": "ok"},
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "*",
+                "Access-Control-Allow-Headers": "*",
+            },
+        )
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
