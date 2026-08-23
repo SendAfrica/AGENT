@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
+
+from .auth_context import get_request_credentials
 
 
 class SendAfricaError(Exception):
@@ -24,24 +27,49 @@ class SendAfricaClient:
     """
 
     def __init__(self, base_url: str, api_key: str, timeout: float = 20.0):
+        self.api_key = api_key
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={
-                "Authorization": f"Bearer {api_key}",
-                "X-API-Key": api_key,
                 "Accept": "application/json",
                 "Content-Type": "application/json",
             },
-            timeout=timeout,
+            timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any] | list[Any]:
-        # Handle path formatting cleanly
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        api_key: str | None = None,
+        authorization: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any] | list[Any]:
+        """Make a request with caller credentials scoped to the current async task."""
         clean_path = path if path.startswith("/") else f"/{path}"
-        resp = await self._client.request(method, clean_path, **kwargs)
+        headers = dict(kwargs.pop("headers", {}) or {})
+        credentials = get_request_credentials()
+        if credentials is not None:
+            api_key = credentials.api_key
+            authorization = credentials.authorization
+
+        headers.pop("X-API-Key", None)
+        headers.pop("Authorization", None)
+        if api_key:
+            headers["X-API-Key"] = api_key
+            headers["Authorization"] = f"Bearer {api_key}"
+        elif authorization:
+            headers["Authorization"] = authorization
+        elif self.api_key:
+            headers["X-API-Key"] = self.api_key
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        resp = await self._client.request(method, clean_path, headers=headers, **kwargs)
         try:
             body = resp.json()
         except ValueError:
@@ -75,19 +103,36 @@ class SendAfricaClient:
         to: str,
         message: str,
         sender_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Send a single SMS message to a mobile number."""
         payload: dict[str, Any] = {"to": to, "message": message}
         if sender_id:
-            payload["sender_id"] = sender_id
+            payload["from"] = sender_id
 
-        auth_header = self._client.headers.get("Authorization", "")
-        endpoint = "/sms/send" if "Bearer eyJ" in auth_header else "/sms"
+        credentials = get_request_credentials()
+        if credentials is not None:
+            auth_header = credentials.authorization or (
+                f"Bearer {credentials.api_key}" if credentials.api_key else ""
+            )
+        else:
+            auth_header = f"Bearer {self.api_key}" if self.api_key else ""
+        endpoint = "/sms/send" if auth_header.startswith("Bearer eyJ") else "/sms/"
         try:
-            res = await self._request("POST", endpoint, json=payload)
+            res = await self._request(
+                "POST",
+                endpoint,
+                json=payload,
+                headers={"Idempotency-Key": idempotency_key} if idempotency_key else None,
+            )
         except SendAfricaError as err:
-            if err.status in (401, 404) and endpoint == "/sms":
-                res = await self._request("POST", "/sms/send", json=payload)
+            if err.status in (401, 404) and endpoint == "/sms/":
+                res = await self._request(
+                    "POST",
+                    "/sms/send",
+                    json=payload,
+                    headers={"Idempotency-Key": idempotency_key} if idempotency_key else None,
+                )
             else:
                 raise err
 
@@ -98,18 +143,48 @@ class SendAfricaClient:
         recipients: list[str],
         message: str,
         sender_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Send bulk SMS messages (up to 100 recipients per batch)."""
-        payload: dict[str, Any] = {"recipients": recipients, "message": message}
+        payload: dict[str, Any] = {"to": recipients, "message": message}
         if sender_id:
-            payload["sender_id"] = sender_id
-        res = await self._request("POST", "/sms/bulk", json=payload)
+            payload["from"] = sender_id
+        res = await self._request(
+            "POST",
+            "/sms/bulk",
+            json=payload,
+            headers={"Idempotency-Key": idempotency_key} if idempotency_key else None,
+        )
         return res if isinstance(res, dict) else {"result": res}
 
-    async def list_sms_logs(self, limit: int = 20, page: int = 1) -> list[dict[str, Any]]:
-        """List SMS delivery status logs."""
-        res = await self._request("GET", f"/sms/logs?per_page={limit}&page={page}")
+    async def list_sms_logs(
+        self,
+        limit: int = 20,
+        page: int = 1,
+        *,
+        status: str | None = None,
+        search: str | None = None,
+        date_from: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List account-owned SMS logs with bounded filters."""
+        params: dict[str, str | int] = {"per_page": max(1, min(limit, 200)), "page": max(1, page)}
+        if status:
+            params["status"] = status
+        if search:
+            params["search"] = search
+        if date_from:
+            params["date_from"] = date_from
+        res = await self._request("GET", f"/sms/logs?{urlencode(params)}")
         return res if isinstance(res, list) else []
+
+    async def get_delivery_status(self, message_id: str) -> dict[str, Any]:
+        """Find one public message log by its SendAfrica message ID."""
+        public_id = message_id.removeprefix("SA-")
+        logs = await self.list_sms_logs(limit=200)
+        for log in logs:
+            if str(log.get("id") or "") == public_id or str(log.get("message_id") or "") == message_id:
+                return log
+        return {"message_id": message_id, "status": "not_found"}
 
     # --- Credits & Billing ----------------------------------------------------
 
@@ -120,7 +195,8 @@ class SendAfricaClient:
 
     async def get_credit_history(self, limit: int = 20, page: int = 1) -> list[dict[str, Any]]:
         """Get paginated credit transaction history."""
-        res = await self._request("GET", f"/credits/history?per_page={limit}&page={page}")
+        params = urlencode({"per_page": max(1, min(limit, 200)), "page": max(1, page)})
+        res = await self._request("GET", f"/credits/history?{params}")
         return res if isinstance(res, list) else []
 
     async def get_voucher_rate(self) -> dict[str, Any]:
@@ -145,7 +221,7 @@ class SendAfricaClient:
 
     async def list_contacts(self, list_id: str | int, search: str | None = None) -> list[dict[str, Any]]:
         """List contacts in a specific contact list."""
-        query = f"?search={search}" if search else ""
+        query = f"?{urlencode({'search': search})}" if search else ""
         res = await self._request("GET", f"/contact-lists/{list_id}/contacts{query}")
         return res if isinstance(res, list) else []
 
@@ -178,6 +254,8 @@ class SendAfricaClient:
         contact_list_id: str | int,
         message: str,
         scheduled_at: str | None = None,
+        sender_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Create and schedule an SMS campaign."""
         payload: dict[str, Any] = {
@@ -187,7 +265,14 @@ class SendAfricaClient:
         }
         if scheduled_at:
             payload["scheduled_at"] = scheduled_at
-        res = await self._request("POST", "/campaigns", json=payload)
+        if sender_id:
+            payload["sender_id"] = sender_id
+        res = await self._request(
+            "POST",
+            "/campaigns",
+            json=payload,
+            headers={"Idempotency-Key": idempotency_key} if idempotency_key else None,
+        )
         return res if isinstance(res, dict) else {"result": res}
 
     async def get_campaign(self, campaign_id: str | int) -> dict[str, Any]:

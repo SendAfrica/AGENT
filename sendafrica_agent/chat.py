@@ -1,17 +1,35 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from typing import Any
 
+from .capabilities import get_capabilities
 from .config import Settings
 from .docs import get_doc_topic, search_docs
 from .mailafrica import MailAfricaClient
 from .ngamia import NgamiaClient
+from .policy import confirmation_decision, confirmation_payload
 from .sendafrica import SendAfricaClient
 from .store import Store
 
 logger = logging.getLogger("sendafrica_agent.chat")
+
+_READ_ONLY_TOOLS = {
+    "get_agent_capabilities",
+    "search_documentation",
+    "get_documentation_topic",
+    "get_account_balance",
+    "get_usage_summary",
+    "list_contacts",
+    "get_delivery_status",
+    "list_inbound_emails",
+    "get_email_balance",
+    "list_models",
+}
+_MAX_TOOL_RESULT_CHARS = 12_000
 
 SENDAFRICA_AGENT_SYSTEM_PROMPT = """You are the official Multi-Channel Assistant for SendAfrica (SMS) & MailAfrica (Email) — an intelligent in-app assistant embedded in the business dashboard.
 You serve as both a knowledgeable support advisor and an action-taking agent capable of executing tools on behalf of business owners.
@@ -19,7 +37,7 @@ You serve as both a knowledgeable support advisor and an action-taking agent cap
 === SENDAFRICA & MAILAFRICA KNOWLEDGE RESOURCE ===
 
 1. PLATFORM OVERVIEW:
-   - SendAfrica (https://app.sendafrica.online) is a Tanzania-first bulk SMS & messaging platform for developers and businesses.
+   - SendAfrica (https://app.sendafrica.online) is an SMS and messaging platform for Tanzania and supported international destinations.
    - MailAfrica (https://app.mailafrica.online) is a transactional and receiving email platform.
    - Documentation & SDK Portals:
      * REST API Docs: https://docs.sendafrica.online
@@ -29,7 +47,7 @@ You serve as both a knowledgeable support advisor and an action-taking agent cap
      * MailAfrica API: https://api.mailafrica.online
 
 2. CREDITS & PRICING (TZS):
-   - SMS Billing: 1 SMS credit = 1 SMS part (up to 160 standard characters).
+   - SMS Billing: GSM-7 uses septets (160 single / 153 multipart); Unicode uses UTF-16 code units (70 single / 67 multipart). Credits use the destination rate card; Tanzania Tier 1 is 1 credit per part.
    - Pay-As-You-Go Voucher Rates:
      * Tier 1 (1,000 TZS to 49,999 TZS): 35 TZS per credit.
      * Tier 2 (50,000 TZS to 149,999 TZS): 32 TZS per credit.
@@ -52,7 +70,7 @@ You serve as both a knowledgeable support advisor and an action-taking agent cap
 
 6. TONAL GUIDANCE & MANDATORY TOOL EXECUTION:
    - Be warm, helpful, personable, and concise. Avoid stiff corporate filler.
-   - If asked a general question about SendAfrica/MailAfrica features, pricing, docs, or API setup, answer directly.
+   - If asked a general question about SendAfrica/MailAfrica features, pricing, docs, or API setup, answer directly. Treat `Success` as provider submission, not handset delivery; use logs for final state.
    - CRITICAL TOOL CALLING RULE: You are an autonomous action-taking agent. WHENEVER the user asks to send an SMS, send an email, check balance, list contacts, or execute any supported feature, YOU MUST EXECUTE THE CORRESPONDING TOOL DIRECTLY (e.g. `send_sms`, `send_email`, `get_account_balance`, `list_contacts`).
    - NEVER reply with text telling the user to log into the dashboard or manually send an SMS. You ARE the action-taking assistant.
    - If the user asks to send an SMS to a phone number (e.g., `0628587749`) and does not specify a message, set `message="Hello! This is a test SMS sent via SendAfrica AI Agent."` and call `send_sms(to="0628587749", message=...)` IMMEDIATELY.
@@ -68,6 +86,14 @@ You serve as both a knowledgeable support advisor and an action-taking agent cap
 """
 
 TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_agent_capabilities",
+            "description": "Discover Agent version, chat features, MCP transports, tool safety, and SMS behavior.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
     # ---- SMS Tools (SendAfrica) ---------------------------------------------
     {
         "type": "function",
@@ -134,6 +160,8 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "to": {"type": "string", "description": "Recipient phone number"},
                     "message": {"type": "string", "description": "SMS message text"},
+                    "sender_id": {"type": "string", "description": "Optional registered sender ID"},
+                    "idempotency_key": {"type": "string", "description": "Stable retry key for this logical send"},
                 },
                 "required": ["to", "message"],
             },
@@ -153,6 +181,8 @@ TOOL_SCHEMAS = [
                         "description": "List of recipient phone numbers e.g. ['0712345678', '0787654321']",
                     },
                     "message": {"type": "string", "description": "SMS message text"},
+                    "sender_id": {"type": "string", "description": "Optional registered sender ID"},
+                    "idempotency_key": {"type": "string", "description": "Stable retry key for this logical send"},
                     "confirmed": {
                         "type": "boolean",
                         "description": "Must be True if sending to more than 10 recipients",
@@ -173,6 +203,9 @@ TOOL_SCHEMAS = [
                     "name": {"type": "string", "description": "Campaign name"},
                     "contact_list_id": {"type": "string", "description": "Target contact list ID"},
                     "message": {"type": "string", "description": "Campaign message text"},
+                    "sender_id": {"type": "string", "description": "Optional registered sender ID"},
+                    "scheduled_at": {"type": "string", "description": "Optional UTC schedule timestamp"},
+                    "idempotency_key": {"type": "string", "description": "Stable retry key for this campaign"},
                     "confirmed": {
                         "type": "boolean",
                         "description": "Must be True if user explicitly confirmed campaign execution",
@@ -291,35 +324,50 @@ class ChatRunner:
         message_text: str,
         user_confirmation: bool = False,
     ) -> dict[str, Any]:
+        message_text = message_text.strip()
+        if not message_text:
+            return {
+                "session_id": session_id,
+                "status": "validation_error",
+                "response": "Message cannot be empty.",
+                "tool_events": [],
+            }
+
         await self.store.get_or_create_session(session_id, account_id, user_id)
         await self.store.append_message(session_id, role="user", content=message_text)
 
-        history = await self.store.get_session_messages(session_id, limit=30)
+        history = await self.store.get_session_messages(
+            session_id, limit=self.settings.agent_chat_history_limit
+        )
         messages_payload: list[dict[str, Any]] = [
             {"role": "system", "content": SENDAFRICA_AGENT_SYSTEM_PROMPT}
         ]
 
-        for m in history:
-            item: dict[str, Any] = {"role": m.role}
-            if m.content:
-                item["content"] = m.content
-            if m.tool_calls:
+        for stored in history:
+            item: dict[str, Any] = {"role": stored.role}
+            if stored.content:
+                item["content"] = stored.content
+            if stored.tool_calls:
                 item["tool_calls"] = [
                     {
-                        "id": tc["id"],
+                        "id": call["id"],
                         "type": "function",
-                        "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                        "function": {
+                            "name": call["name"],
+                            "arguments": call["arguments"],
+                        },
                     }
-                    for tc in m.tool_calls
+                    for call in stored.tool_calls
                 ]
-            if m.tool_id:
-                item["tool_call_id"] = m.tool_id
+            if stored.tool_id:
+                item["tool_call_id"] = stored.tool_id
             messages_payload.append(item)
 
-        max_loops = 5
+        max_loops = max(1, self.settings.agent_chat_max_loops)
         loop_count = 0
         final_response_text = ""
         confirmation_required_data: dict[str, Any] | None = None
+        events: list[dict[str, Any]] = []
 
         while loop_count < max_loops:
             loop_count += 1
@@ -335,48 +383,110 @@ class ChatRunner:
             await self.store.append_message(
                 session_id, role="assistant", content=content, tool_calls=tool_calls
             )
-            messages_payload.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {"name": tc["name"], "arguments": tc["arguments"]},
-                    }
-                    for tc in tool_calls
-                ],
-            })
+            messages_payload.append(
+                {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [
+                        {
+                            "id": call["id"],
+                            "type": "function",
+                            "function": {
+                                "name": call["name"],
+                                "arguments": call["arguments"],
+                            },
+                        }
+                        for call in tool_calls
+                    ],
+                }
+            )
 
-            for tc in tool_calls:
-                tool_id = tc["id"]
-                tool_name = tc["name"]
+            async def execute_call(call: dict[str, Any]) -> tuple[dict[str, Any], bool, float]:
+                started = time.perf_counter()
                 try:
-                    args = json.loads(tc["arguments"])
-                except Exception:
+                    args = json.loads(call.get("arguments", "{}"))
+                except (TypeError, ValueError):
                     args = {}
+                try:
+                    result, requires_confirm = await asyncio.wait_for(
+                        self._execute_tool(
+                            tool_name=call.get("name", ""),
+                            args=args,
+                            user_confirmation=user_confirmation,
+                        ),
+                        timeout=self.settings.agent_tool_timeout_seconds,
+                    )
+                except TimeoutError:
+                    result, requires_confirm = {
+                        "error": "tool_timeout",
+                        "message": "The tool exceeded the configured execution timeout.",
+                    }, False
+                duration_ms = round((time.perf_counter() - started) * 1000, 1)
+                return result, requires_confirm, duration_ms
 
-                tool_result, requires_confirm = await self._execute_tool(
-                    tool_name, args, user_confirmation=user_confirmation
-                )
+            names = [call.get("name", "") for call in tool_calls]
+            if len(tool_calls) > 1 and all(name in _READ_ONLY_TOOLS for name in names):
+                executed = await asyncio.gather(*(execute_call(call) for call in tool_calls))
+            else:
+                executed = [await execute_call(call) for call in tool_calls]
 
+            for call, (tool_result, requires_confirm, duration_ms) in zip(tool_calls, executed, strict=True):
+                tool_name = call.get("name", "unknown")
                 if requires_confirm:
                     confirmation_required_data = tool_result
+                event: dict[str, Any] = {
+                    "tool": tool_name,
+                    "status": "confirmation_required" if requires_confirm else "completed",
+                    "duration_ms": duration_ms,
+                }
+                if isinstance(tool_result, dict) and tool_result.get("error"):
+                    event["status"] = "failed"
+                    event["error"] = tool_result["error"]
+                events.append(event)
 
-                tool_result_str = json.dumps(tool_result)
+                tool_result_str = json.dumps(tool_result, separators=(",", ":"))
+                if len(tool_result_str) > _MAX_TOOL_RESULT_CHARS:
+                    tool_result_str = json.dumps(
+                        {
+                            "error": "tool_result_too_large",
+                            "message": "Tool output was truncated safely.",
+                        }
+                    )
                 await self.store.append_message(
-                    session_id, role="tool", content=tool_result_str, tool_id=tool_id
+                    session_id,
+                    role="tool",
+                    content=tool_result_str,
+                    tool_id=call.get("id", ""),
                 )
-                messages_payload.append({
-                    "role": "tool",
-                    "tool_call_id": tool_id,
-                    "content": tool_result_str,
-                })
+                messages_payload.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.get("id", ""),
+                        "content": tool_result_str,
+                    }
+                )
+                if requires_confirm:
+                    break
+            if confirmation_required_data is not None:
+                break
+
+        if confirmation_required_data is not None:
+            response = "Confirmation is required before I execute that action."
+            status = "confirmation_required"
+        elif final_response_text:
+            response = final_response_text
+            status = "completed"
+        else:
+            response = "I could not complete the request within the tool-call limit."
+            status = "loop_limit"
 
         return {
             "session_id": session_id,
-            "response": final_response_text or "Task completed.",
+            "status": status,
+            "response": response,
             "confirmation_required": confirmation_required_data,
+            "tool_events": events,
+            "iterations": loop_count,
         }
 
     async def _execute_tool(
@@ -384,8 +494,14 @@ class ChatRunner:
     ) -> tuple[dict[str, Any], bool]:
         """Execute SMS, Email, or Documentation tool with guardrail check."""
         try:
+            decision = confirmation_decision(tool_name, args)
+            if decision.required and not user_confirmation and not args.get("confirmed"):
+                return confirmation_payload(tool_name, args), True
+
             # ---- Documentation & SDK Tools ----------------------------------
-            if tool_name == "search_documentation":
+            if tool_name == "get_agent_capabilities":
+                return get_capabilities(), False
+            elif tool_name == "search_documentation":
                 res = search_docs(args["query"], target=args.get("target", "all"))
                 return {"results": res}, False
 
@@ -399,8 +515,12 @@ class ChatRunner:
                 return res, False
 
             elif tool_name == "get_usage_summary":
-                res = await self.sendafrica.list_sms_logs(limit=50)
-                return {"summary": "Recent usage fetched", "logs_count": len(res)}, False
+                res = await self.sendafrica.list_sms_logs(limit=100)
+                counts: dict[str, int] = {}
+                for log in res:
+                    status = str(log.get("status") or "unknown")
+                    counts[status] = counts.get(status, 0) + 1
+                return {"period": args.get("period", "this_month"), "counts": counts, "logs_count": len(res)}, False
 
             elif tool_name == "list_contacts":
                 list_id = args.get("list_id") or "1"
@@ -408,63 +528,44 @@ class ChatRunner:
                 return {"contacts": res}, False
 
             elif tool_name == "get_delivery_status":
-                res = await self.sendafrica.list_sms_logs(limit=10)
-                return {"logs": res}, False
+                message_id = str(args.get("message_id") or "").strip()
+                if not message_id:
+                    return {"error": "message_id_required"}, False
+                return await self.sendafrica.get_delivery_status(message_id), False
 
             elif tool_name == "send_sms":
-                res = await self.sendafrica.send_sms(to=args["to"], message=args["message"])
+                res = await self.sendafrica.send_sms(
+                    to=args["to"],
+                    message=args["message"],
+                    sender_id=args.get("sender_id") or None,
+                    idempotency_key=args.get("idempotency_key") or None,
+                )
                 return res, False
 
             elif tool_name == "send_bulk_sms":
                 recipients = args.get("recipients") or []
-                if len(recipients) > 10 and not user_confirmation and not args.get("confirmed"):
-                    return (
-                        {
-                            "status": "confirmation_required",
-                            "action": "send_bulk_sms",
-                            "recipients_count": len(recipients),
-                            "message": args.get("message"),
-                            "notice": f"Sending SMS to {len(recipients)} numbers requires explicit confirmation.",
-                        },
-                        True,
-                    )
-                res = await self.sendafrica.send_bulk_sms(recipients=recipients, message=args["message"])
+                res = await self.sendafrica.send_bulk_sms(
+                    recipients=recipients,
+                    message=args["message"],
+                    sender_id=args.get("sender_id") or None,
+                    idempotency_key=args.get("idempotency_key") or None,
+                )
                 return res, False
 
             elif tool_name == "create_campaign":
-                if not user_confirmation and not args.get("confirmed"):
-                    return (
-                        {
-                            "status": "confirmation_required",
-                            "action": "create_campaign",
-                            "name": args.get("name"),
-                            "contact_list_id": args.get("contact_list_id"),
-                            "message": args.get("message"),
-                            "notice": "Please explicitly confirm to execute campaign send.",
-                        },
-                        True,
-                    )
                 res = await self.sendafrica.create_campaign(
                     name=args["name"],
                     contact_list_id=args["contact_list_id"],
                     message=args["message"],
+                    sender_id=args.get("sender_id") or None,
+                    scheduled_at=args.get("scheduled_at") or None,
+                    idempotency_key=args.get("idempotency_key") or None,
                 )
                 return res, False
 
             # ---- MailAfrica Tools (Phase 2) ----------------------------------
             elif tool_name == "send_email":
                 recipients = args.get("to") or []
-                if len(recipients) > 5 and not user_confirmation and not args.get("confirmed"):
-                    return (
-                        {
-                            "status": "confirmation_required",
-                            "action": "send_email",
-                            "recipients": recipients,
-                            "subject": args.get("subject"),
-                            "notice": f"Sending email to {len(recipients)} recipients requires explicit user confirmation.",
-                        },
-                        True,
-                    )
                 res = await self.mailafrica.send_email(
                     to=recipients,
                     subject=args["subject"],

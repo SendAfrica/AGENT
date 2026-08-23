@@ -23,6 +23,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["sendafrica_agent"]
 
+[dependency-groups]
+dev = ["ruff>=0.8,<1"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

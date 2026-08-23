@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import aiosqlite
+
+
+class StoreError(Exception):
+    """Raised when a session cannot be safely used by the requested identity."""
 
 
 @dataclass
@@ -20,15 +25,18 @@ class StoredMessage:
 
 
 class Store:
-    """SQLite storage for Dashboard AI Agent chat sessions and message logs."""
+    """SQLite storage for dashboard sessions with bounded, account-scoped history."""
 
     def __init__(self, path: str):
         self.path = path
+        self.db: aiosqlite.Connection | None = None
+        self._write_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         self.db = await aiosqlite.connect(self.path)
         self.db.row_factory = aiosqlite.Row
         await self.db.execute("PRAGMA journal_mode=WAL")
+        await self.db.execute("PRAGMA synchronous=NORMAL")
         await self.db.execute("PRAGMA busy_timeout=5000")
         await self.db.executescript(
             """
@@ -51,31 +59,114 @@ class Store:
                 FOREIGN KEY(session_id) REFERENCES agent_sessions(id)
             );
 
-            CREATE INDEX IF NOT EXISTS idx_agent_messages_session
-                ON agent_messages (session_id, id);
+            CREATE INDEX IF NOT EXISTS idx_agent_messages_session_desc
+                ON agent_messages (session_id, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_agent_sessions_account_updated
+                ON agent_sessions (account_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS agent_phone_configs (
+                phone       TEXT PRIMARY KEY,
+                enabled     INTEGER NOT NULL DEFAULT 1,
+                mode        TEXT NOT NULL DEFAULT 'off',
+                persona     TEXT,
+                updated_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_turns (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone       TEXT NOT NULL,
+                role        TEXT NOT NULL,
+                content     TEXT NOT NULL,
+                message_id  TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_turns_phone_desc
+                ON agent_turns (phone, id DESC);
             """
         )
         await self.db.commit()
 
     async def close(self) -> None:
-        await self.db.close()
+        if self.db is not None:
+            await self.db.close()
+            self.db = None
+
+    def _require_db(self) -> aiosqlite.Connection:
+        if self.db is None:
+            raise StoreError("store is not connected")
+        return self.db
 
     # --- Sessions -------------------------------------------------------------
 
     async def get_or_create_session(self, session_id: str, account_id: str, user_id: str) -> str:
-        now = datetime.now(timezone.utc).isoformat()
-        cur = await self.db.execute("SELECT id FROM agent_sessions WHERE id = ?", (session_id,))
-        row = await cur.fetchone()
-        await cur.close()
+        if not session_id or not account_id or not user_id:
+            raise StoreError("session, account, and user identity are required")
 
-        if not row:
-            await self.db.execute(
-                "INSERT INTO agent_sessions (id, account_id, user_id, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        async with self._write_lock:
+            await db.execute(
+                "INSERT OR IGNORE INTO agent_sessions "
+                "(id, account_id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                 (session_id, account_id, user_id, now, now),
             )
-            await self.db.commit()
+            cur = await db.execute(
+                "SELECT account_id, user_id FROM agent_sessions WHERE id = ?", (session_id,)
+            )
+            row = await cur.fetchone()
+            await cur.close()
+            if row is None:
+                raise StoreError("unable to create session")
+            if row["account_id"] != account_id or row["user_id"] != user_id:
+                raise StoreError("session belongs to a different identity")
+            await db.commit()
         return session_id
+
+    # --- Inbound SMS configuration and history -------------------------------
+
+    async def get_config(self, phone: str) -> dict[str, Any] | None:
+        db = self._require_db()
+        cur = await db.execute(
+            "SELECT enabled, mode, persona FROM agent_phone_configs WHERE phone = ?", (phone,)
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        if row is None:
+            return None
+        return {"enabled": bool(row["enabled"]), "mode": row["mode"], "persona": row["persona"]}
+
+    async def append_turn(self, phone: str, role: str, content: str, message_id: str = "") -> None:
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        async with self._write_lock:
+            await db.execute(
+                "INSERT INTO agent_turns (phone, role, content, message_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (phone, role, content, message_id, now),
+            )
+            await db.commit()
+
+    async def get_thread(self, phone: str, limit: int = 20) -> list[StoredMessage]:
+        db = self._require_db()
+        bounded_limit = max(1, min(limit, 100))
+        cur = await db.execute(
+            "SELECT id, phone, role, content, message_id, created_at "
+            "FROM agent_turns WHERE phone = ? ORDER BY id DESC LIMIT ?",
+            (phone, bounded_limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return [
+            StoredMessage(
+                id=row["id"],
+                session_id=row["phone"],
+                role=row["role"],
+                content=row["content"],
+                tool_id=row["message_id"] or None,
+                created_at=row["created_at"],
+            )
+            for row in reversed(rows)
+        ]
 
     # --- Messages -------------------------------------------------------------
 
@@ -87,21 +178,23 @@ class Store:
         tool_calls: list[dict[str, Any]] | None = None,
         tool_id: str | None = None,
     ) -> StoredMessage:
-        now = datetime.now(timezone.utc).isoformat()
-        tool_calls_json = json.dumps(tool_calls or [])
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        tool_calls_json = json.dumps(tool_calls or [], separators=(",", ":"))
 
-        cur = await self.db.execute(
-            "INSERT INTO agent_messages (session_id, role, content, tool_calls, tool_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (session_id, role, content, tool_calls_json, tool_id, now),
-        )
-        msg_id = cur.lastrowid
-        await cur.close()
-        await self.db.execute(
-            "UPDATE agent_sessions SET updated_at = ? WHERE id = ?",
-            (now, session_id),
-        )
-        await self.db.commit()
+        async with self._write_lock:
+            cur = await db.execute(
+                "INSERT INTO agent_messages (session_id, role, content, tool_calls, tool_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, role, content, tool_calls_json, tool_id, now),
+            )
+            msg_id = cur.lastrowid
+            await cur.close()
+            await db.execute(
+                "UPDATE agent_sessions SET updated_at = ? WHERE id = ?",
+                (now, session_id),
+            )
+            await db.commit()
 
         return StoredMessage(
             id=msg_id,
@@ -114,27 +207,29 @@ class Store:
         )
 
     async def get_session_messages(self, session_id: str, limit: int = 50) -> list[StoredMessage]:
-        cur = await self.db.execute(
+        db = self._require_db()
+        bounded_limit = max(1, min(limit, 100))
+        cur = await db.execute(
             "SELECT id, session_id, role, content, tool_calls, tool_id, created_at "
-            "FROM agent_messages WHERE session_id = ? ORDER BY id ASC LIMIT ?",
-            (session_id, limit),
+            "FROM agent_messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (session_id, bounded_limit),
         )
         rows = await cur.fetchall()
         await cur.close()
 
-        messages = []
-        for row in rows:
+        messages: list[StoredMessage] = []
+        for row in reversed(rows):
             try:
-                tc = json.loads(row["tool_calls"]) if row["tool_calls"] else []
-            except Exception:
-                tc = []
+                tool_calls = json.loads(row["tool_calls"]) if row["tool_calls"] else []
+            except (TypeError, ValueError):
+                tool_calls = []
             messages.append(
                 StoredMessage(
                     id=row["id"],
                     session_id=row["session_id"],
                     role=row["role"],
                     content=row["content"],
-                    tool_calls=tc,
+                    tool_calls=tool_calls,
                     tool_id=row["tool_id"],
                     created_at=row["created_at"],
                 )

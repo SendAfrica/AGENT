@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -15,18 +17,34 @@ class NgamiaClient:
     Supports chat completion with tool calling (OpenAI wire format).
     """
 
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 60.0):
+    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 45.0):
         if not api_key:
             raise NgamiaError("NGAMIA_API_KEY is required")
         self.model = model
-        self._client = AsyncOpenAI(base_url=base_url.rstrip("/"), api_key=api_key, timeout=timeout)
+        self._client = AsyncOpenAI(
+            base_url=base_url.rstrip("/"),
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=1,
+        )
+        self._models_cache: tuple[float, list[str]] | None = None
+        self._models_lock = asyncio.Lock()
 
     async def list_models(self) -> list[str]:
-        try:
-            models = await self._client.models.list()
-        except Exception as exc:
-            raise NgamiaError(f"list models failed: {exc}") from exc
-        return [getattr(m, "model", None) or m.id for m in models.data]
+        now = time.monotonic()
+        if self._models_cache and now - self._models_cache[0] < 60:
+            return list(self._models_cache[1])
+        async with self._models_lock:
+            now = time.monotonic()
+            if self._models_cache and now - self._models_cache[0] < 60:
+                return list(self._models_cache[1])
+            try:
+                models = await self._client.models.list()
+            except Exception as exc:
+                raise NgamiaError(f"list models failed: {exc}") from exc
+            names = [getattr(m, "model", None) or m.id for m in models.data]
+            self._models_cache = (now, names)
+            return list(names)
 
     async def chat_with_tools(
         self,

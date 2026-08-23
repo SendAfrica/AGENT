@@ -68,7 +68,12 @@ class Agent:
             return out
 
         # Mode == "auto": Send actual outbound SMS reply
-        send_res = await self.sendafrica.send_sms(to=phone, message=reply)
+        idempotency_key = f"agent-inbound-{message_id}" if message_id else None
+        send_res = await self.sendafrica.send_sms(
+            to=phone,
+            message=reply,
+            idempotency_key=idempotency_key,
+        )
         out["sent"] = send_res
         await self.store.append_turn(phone, "assistant", reply, message_id)
         return out
