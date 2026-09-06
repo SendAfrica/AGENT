@@ -1,0 +1,27 @@
+services:
+  sendafrica-agent:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8099:8099"
+    volumes:
+      - /var/lib/docker/volumes/ziop6vojlpcn3tefz41vwelf_sendafrica-agent-agent-data/_data:/app/data
+    environment:
+      SENDAFRICA_API_BASE: ${SENDAFRICA_API_BASE:?}
+      SENDAFRICA_API_KEY: ${SENDAFRICA_API_KEY:?}
+      MAILAFRICA_API_BASE: ${MAILAFRICA_API_BASE:?}
+      MAILAFRICA_API_KEY: ${MAILAFRICA_API_KEY:?}
+      NGAMIA_BASE_URL: ${NGAMIA_BASE_URL:?}
+      NGAMIA_API_KEY: ${NGAMIA_API_KEY:?}
+      NGAMIA_MODEL: ${NGAMIA_MODEL:?}
+      AGENT_WEBHOOK_SECRET: ${AGENT_WEBHOOK_SECRET:?}
+      AGENT_DB_PATH: /app/data/agent.db
+      AGENT_DEFAULT_MODE: ${AGENT_DEFAULT_MODE:?}
+      AGENT_HOST: 0.0.0.0
+      AGENT_PORT: "8099"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8099/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
