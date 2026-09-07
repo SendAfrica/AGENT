@@ -500,7 +500,14 @@ class ChatRunner:
                 return result, requires_confirm, duration_ms
 
             names = [call.get("name", "") for call in tool_calls]
-            if len(tool_calls) > 1 and all(name in _READ_ONLY_TOOLS for name in names):
+            args_list = []
+            for call in tool_calls:
+                try:
+                    args_list.append(json.loads(call.get("arguments", "{}")))
+                except (TypeError, ValueError):
+                    args_list.append({})
+            needs_confirmation = any(confirmation_decision(name, args).required for name, args in zip(names, args_list, strict=True))
+            if len(tool_calls) > 1 and not needs_confirmation:
                 executed = await asyncio.gather(*(execute_call(call) for call in tool_calls))
             else:
                 executed = [await execute_call(call) for call in tool_calls]

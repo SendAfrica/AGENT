@@ -30,7 +30,14 @@ class Store:
     def __init__(self, path: str):
         self.path = path
         self.db: aiosqlite.Connection | None = None
-        self._write_lock = asyncio.Lock()
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._session_locks_lock = asyncio.Lock()
+
+    async def _get_session_lock(self, session_id: str) -> asyncio.Lock:
+        async with self._session_locks_lock:
+            if session_id not in self._session_locks:
+                self._session_locks[session_id] = asyncio.Lock()
+            return self._session_locks[session_id]
 
     async def connect(self) -> None:
         self.db = await aiosqlite.connect(self.path)
@@ -105,7 +112,8 @@ class Store:
 
         db = self._require_db()
         now = datetime.now(UTC).isoformat()
-        async with self._write_lock:
+        session_lock = await self._get_session_lock(session_id)
+        async with session_lock:
             await db.execute(
                 "INSERT OR IGNORE INTO agent_sessions "
                 "(id, account_id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -139,7 +147,8 @@ class Store:
     async def append_turn(self, phone: str, role: str, content: str, message_id: str = "") -> None:
         db = self._require_db()
         now = datetime.now(UTC).isoformat()
-        async with self._write_lock:
+        session_lock = await self._get_session_lock(phone)
+        async with session_lock:
             await db.execute(
                 "INSERT INTO agent_turns (phone, role, content, message_id, created_at) VALUES (?, ?, ?, ?, ?)",
                 (phone, role, content, message_id, now),
@@ -182,7 +191,8 @@ class Store:
         now = datetime.now(UTC).isoformat()
         tool_calls_json = json.dumps(tool_calls or [], separators=(",", ":"))
 
-        async with self._write_lock:
+        session_lock = await self._get_session_lock(session_id)
+        async with session_lock:
             cur = await db.execute(
                 "INSERT INTO agent_messages (session_id, role, content, tool_calls, tool_id, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",

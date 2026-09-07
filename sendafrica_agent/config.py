@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     agent_allowed_origins: str = "https://app.sendafrica.online,https://app.mailafrica.online"
     agent_allowed_hosts: str = "api.sendafrica.online,localhost,127.0.0.1"
     agent_request_timeout_seconds: float = 45.0
-    agent_chat_max_loops: int = 4
+    agent_chat_max_loops: int = 2
     agent_chat_history_limit: int = 30
     agent_tool_timeout_seconds: float = 25.0
     agent_rate_limit_per_minute: int = 60
