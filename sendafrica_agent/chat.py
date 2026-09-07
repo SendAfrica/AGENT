@@ -28,6 +28,10 @@ _READ_ONLY_TOOLS = {
     "list_inbound_emails",
     "get_email_balance",
     "list_models",
+    "get_sender_id_requirements",
+    "list_sender_ids",
+    "get_sender_id",
+    "list_usable_sender_ids",
 }
 _MAX_TOOL_RESULT_CHARS = 12_000
 
@@ -212,6 +216,77 @@ TOOL_SCHEMAS = [
                     },
                 },
                 "required": ["name", "contact_list_id", "message"],
+            },
+        },
+    },
+    # ---- Sender ID Tools -----------------------------------------------------
+    {
+        "type": "function",
+        "function": {
+            "name": "get_sender_id_requirements",
+            "description": "Get registration requirements, eligibility, and rules for sender IDs.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_sender_ids",
+            "description": "List sender IDs registered for the authenticated account.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_sender_id",
+            "description": "Inspect a specific sender ID by its ID or name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sender_id": {"type": "string", "description": "Sender ID UUID or registered name"}
+                },
+                "required": ["sender_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_usable_sender_ids",
+            "description": "List platform defaults and approved custom sender IDs available for sends.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string", "description": "Optional provider filter: swala or africastalking"}
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_sender_id",
+            "description": "Submit a new sender ID registration request (free). Requires explicit confirmation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Sender ID name (3-11 chars, letters/numbers/spaces)"},
+                    "purpose": {"type": "string", "description": "Purpose e.g. Notification, Transactional, OTP, Marketing"},
+                    "sample_message": {"type": "string", "description": "A real example message (50-500 chars)"},
+                    "country": {"type": "string", "description": "Country code, defaults to TZ"},
+                    "documents": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "Optional supporting documents with requirement_uid, filename, content_base64",
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "Must be True if user explicitly confirmed sender ID registration",
+                    },
+                },
+                "required": ["name", "purpose", "sample_message"],
             },
         },
     },
@@ -563,6 +638,29 @@ class ChatRunner:
                 )
                 return res, False
 
+            # ---- Sender ID Tools -------------------------------------------------
+            elif tool_name == "get_sender_id_requirements":
+                return await self.sendafrica.get_sender_id_requirements(), False
+
+            elif tool_name == "list_sender_ids":
+                return {"sender_ids": await self.sendafrica.list_sender_ids()}, False
+
+            elif tool_name == "get_sender_id":
+                return await self.sendafrica.get_sender_id(args["sender_id"]), False
+
+            elif tool_name == "list_usable_sender_ids":
+                return {"usable_sender_ids": await self.sendafrica.list_usable_sender_ids(provider=args.get("provider"))}, False
+
+            elif tool_name == "request_sender_id":
+                res = await self.sendafrica.request_sender_id(
+                    name=args["name"],
+                    purpose=args["purpose"],
+                    sample_message=args["sample_message"],
+                    country=args.get("country") or "TZ",
+                    documents=args.get("documents"),
+                )
+                return res, False
+
             # ---- MailAfrica Tools (Phase 2) ----------------------------------
             elif tool_name == "send_email":
                 recipients = args.get("to") or []
@@ -570,7 +668,7 @@ class ChatRunner:
                     to=recipients,
                     subject=args["subject"],
                     text_body=args.get("body"),
-                    from_address=args.get("from_address"),
+                    from_address=args.get("from_address") or self.settings.agent_default_from_address,
                 )
                 return res, False
 

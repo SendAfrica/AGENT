@@ -72,6 +72,7 @@ def build_server(runtime: Runtime) -> FastMCP:
     sendafrica = runtime.sendafrica
     mailafrica = runtime.mailafrica
     ngamia = runtime.ngamia
+    default_from_address = runtime.settings.agent_default_from_address
 
     # ---- SendAfrica Dashboard Tool Surface (SMS) -----------------------------
 
@@ -163,6 +164,50 @@ def build_server(runtime: Runtime) -> FastMCP:
             counts[status] = counts.get(status, 0) + 1
         return {"period": period, "counts": counts, "logs_count": len(logs), "recent_logs": logs[:5]}
 
+    # ---- Sender ID Tools -----------------------------------------------------
+
+    @mcp.tool()
+    async def get_sender_id_requirements() -> dict[str, Any]:
+        """Get registration requirements, eligibility, and rules for sender IDs."""
+        return await sendafrica.get_sender_id_requirements()
+
+    @mcp.tool()
+    async def list_sender_ids() -> list[dict[str, Any]]:
+        """List sender IDs registered for the authenticated account."""
+        return await sendafrica.list_sender_ids()
+
+    @mcp.tool()
+    async def get_sender_id(sender_id: str) -> dict[str, Any]:
+        """Inspect a specific sender ID by its ID or name."""
+        return await sendafrica.get_sender_id(sender_id)
+
+    @mcp.tool()
+    async def list_usable_sender_ids(provider: str = "") -> list[dict[str, Any]]:
+        """List platform defaults and approved custom sender IDs available for sends."""
+        return await sendafrica.list_usable_sender_ids(provider=provider or None)
+
+    @mcp.tool()
+    async def request_sender_id(
+        name: str,
+        purpose: str,
+        sample_message: str,
+        country: str = "TZ",
+        documents: list[dict[str, Any]] | None = None,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Submit a new sender ID registration request (free). Requires explicit confirmation."""
+        args = {"name": name, "purpose": purpose, "sample_message": sample_message, "country": country, "confirmed": confirmed}
+        decision = confirmation_decision("request_sender_id", args)
+        if decision.required and not confirmed:
+            return confirmation_payload("request_sender_id", args)
+        return await sendafrica.request_sender_id(
+            name=name,
+            purpose=purpose,
+            sample_message=sample_message,
+            country=country,
+            documents=documents,
+        )
+
     # ---- MailAfrica Dashboard Tool Surface (Email - Phase 2) -----------------
 
     @mcp.tool()
@@ -179,7 +224,7 @@ def build_server(runtime: Runtime) -> FastMCP:
         if decision.required and not confirmed:
             return confirmation_payload("send_email", args)
         return await mailafrica.send_email(
-            to=to, subject=subject, text_body=body, from_address=from_address or None
+            to=to, subject=subject, text_body=body, from_address=from_address or default_from_address
         )
 
     @mcp.tool()

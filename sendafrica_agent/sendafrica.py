@@ -228,16 +228,19 @@ class SendAfricaClient:
     async def create_contact(
         self,
         list_id: str | int,
-        phone: str,
-        name: str | None = None,
-        email: str | None = None,
+        first_name: str,
+        last_name: str | None = None,
+        phone: str | None = None,
+        tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """Add a contact to a contact list."""
-        payload: dict[str, Any] = {"phone": phone}
-        if name:
-            payload["name"] = name
-        if email:
-            payload["email"] = email
+        payload: dict[str, Any] = {"first_name": first_name}
+        if last_name:
+            payload["last_name"] = last_name
+        if phone:
+            payload["phone"] = phone
+        if tags:
+            payload["tags"] = tags
         res = await self._request("POST", f"/contact-lists/{list_id}/contacts", json=payload)
         return res if isinstance(res, dict) else {"result": res}
 
@@ -280,22 +283,67 @@ class SendAfricaClient:
         res = await self._request("GET", f"/campaigns/{campaign_id}")
         return res if isinstance(res, dict) else {"campaign": res}
 
+    # --- Sender IDs -----------------------------------------------------------
+
+    async def get_sender_id_requirements(self) -> dict[str, Any]:
+        """Get registration requirements, rules, and eligibility for sender IDs."""
+        res = await self._request("GET", "/sender-ids/requirements")
+        return res if isinstance(res, dict) else {}
+
+    async def list_sender_ids(self) -> list[dict[str, Any]]:
+        """List sender IDs registered for the authenticated account."""
+        res = await self._request("GET", "/sender-ids")
+        return res if isinstance(res, list) else []
+
+    async def get_sender_id(self, sender_id: str | int) -> dict[str, Any]:
+        """Inspect a specific sender ID registered to the account."""
+        res = await self._request("GET", f"/sender-ids/{sender_id}")
+        return res if isinstance(res, dict) else {}
+
+    async def list_usable_sender_ids(self, provider: str | None = None) -> list[dict[str, Any]]:
+        """List platform defaults and account-approved custom sender IDs available for sends."""
+        params: dict[str, str] = {}
+        if provider:
+            params["provider"] = provider
+        res = await self._request("GET", f"/sender-ids/usable?{urlencode(params)}" if params else "/sender-ids/usable")
+        return res if isinstance(res, list) else []
+
+    async def request_sender_id(
+        self,
+        name: str,
+        purpose: str,
+        sample_message: str,
+        country: str = "TZ",
+        documents: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Submit a new sender ID registration request."""
+        payload: dict[str, Any] = {
+            "name": name,
+            "country": country,
+            "purpose": purpose,
+            "sample_message": sample_message,
+        }
+        if documents:
+            payload["documents"] = documents
+        res = await self._request("POST", "/sender-ids", json=payload)
+        return res if isinstance(res, dict) else {"result": res}
+
     # --- Payments -------------------------------------------------------------
 
     async def initiate_payment(
         self,
-        phone_number: str,
+        phone: str,
+        amount: int,
         package_id: str | int | None = None,
-        amount_tzs: float | None = None,
         provider: str = "snippe",
     ) -> dict[str, Any]:
         """Initiate top-up payment order (package or pay-as-you-go voucher)."""
-        if amount_tzs is not None:
-            path = "/vouchers"
-            payload: dict[str, Any] = {"phone_number": phone_number, "amount_tzs": amount_tzs, "provider": provider}
-        else:
+        if package_id is not None:
             path = "/payments"
-            payload = {"phone_number": phone_number, "package_id": package_id, "provider": provider}
+            payload: dict[str, Any] = {"phone": phone, "amount": amount, "package_id": package_id, "provider": provider}
+        else:
+            path = "/vouchers"
+            payload = {"phone": phone, "amount": amount, "provider": provider}
 
         res = await self._request("POST", path, json=payload)
         return res if isinstance(res, dict) else {"result": res}

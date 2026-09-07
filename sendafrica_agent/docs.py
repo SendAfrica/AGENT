@@ -72,24 +72,57 @@ DOCS_INDEX: dict[str, dict[str, Any]] = {
         "content": (
             "POST /v1/agent/chat accepts session_id, message, and user_confirmation. The response "
             "includes status, response, confirmation_required, tool_events, iterations, and request_id. "
-            "Confirmation is required for campaigns, bulk SMS over 10 recipients, and email over 5 recipients."
+            "Confirmation is required for campaigns, bulk SMS over 10 recipients, email over 5 recipients, "
+            "and sender ID registration requests."
         ),
         "code_examples": {
             "curl": "curl -X POST https://agent.example.com/v1/agent/chat -H 'X-API-Key: SA-xxxx' -H 'X-Account-ID: account-uuid' -H 'Content-Type: application/json' -d '{\"session_id\":\"chat-1\",\"message\":\"Show my balance\"}'",
         },
     },
-    "sandbox": {
-        "title": "SendAfrica API Sandbox",
+    "sender_id_request": {
+        "title": "Register a Sender ID (POST /v1/sender-ids)",
         "site": "docs.sendafrica.online",
-        "description": "Safe API-key-only mock environment for simulated sends and delivery transitions.",
+        "description": "Submit a free sender ID registration request with name, purpose, sample message, and optional documents.",
         "content": (
-            "The API Sandbox is isolated from Africa's Talking, credits, payments, and production logs. "
-            "Use its capabilities, preview, create, list, detail, delivery, and reset endpoints before live sends."
+            "Sender ID registration is free. The name must be 3-11 characters matching ^[A-Za-z0-9]+( [A-Za-z0-9]+)*$. "
+            "Reserved names like ADMIN, ALERT, BANK, GOV, OTP, SAFARICOM, VODACOM, and WHATSAPP are blocked. "
+            "Provide a sample message (50-500 chars) and a purpose from the allowed list. "
+            "Optional documents are arrays of requirement_uid, filename, and content_base64. "
+            "The account must have at least 100 purchased sender ID units (TZS 1,300 minimum). "
+            "Status transitions from pending to approved/rejected/suspended. Approved IDs become usable for sends."
         ),
         "code_examples": {
-            "curl": "curl https://api.sendafrica.online/v1/sandbox/capabilities -H 'X-API-Key: SA-sandbox-key'",
+            "curl": "curl -X POST https://api.sendafrica.online/v1/sender-ids -H 'X-API-Key: SA-xxxx' -H 'Content-Type: application/json' -d '{\"name\":\"MyBrand\",\"purpose\":\"Notification\",\"sample_message\":\"Your order is ready\",\"country\":\"TZ\"}'",
+            "python": "res = client.sender_ids.request(name='MyBrand', purpose='Notification', sample_message='Your order is ready')",
         },
     },
+    "sender_id_usable": {
+        "title": "List Usable Sender IDs (GET /v1/sender-ids/usable)",
+        "site": "docs.sendafrica.online",
+        "description": "Get platform defaults and account-approved custom sender IDs available for sends.",
+        "content": (
+            "Returns platform defaults (SendAfrika for Africa's Talking, SENDAFRICA for SwalaSMS) "
+            "plus any account-approved custom sender IDs. Filter by provider query param (swala or africastalking). "
+            "Only usable IDs (approved and not suspended) appear here. Use these values for the from field in SMS sends."
+        ),
+        "code_examples": {
+            "curl": "curl https://api.sendafrica.online/v1/sender-ids/usable -H 'X-API-Key: SA-xxxx'",
+            "python": "usable = client.sender_ids.usable()",
+        },
+    },
+    "email_from": {
+        "title": "SendAfrica Agent Default From Address",
+        "site": "docs.sendafrica.online",
+        "description": "The agent uses agent@mailafrica.online as the default from address for MailAfrica emails.",
+        "content": (
+            "When sending emails via the SendAfrica Agent (MCP or dashboard chat), if no from_address is provided, "
+            "the agent automatically uses agent@mailafrica.online. You can override this by passing a custom from_address."
+        ),
+        "code_examples": {
+            "python": "await agent.send_email(to=['user@example.com'], subject='Hello', body='Test')",
+        },
+    },
+
     "webhooks": {
         "title": "Inbound SMS Webhooks and Provider Callbacks",
         "site": "docs.sendafrica.online",

@@ -39,6 +39,13 @@ def confirmation_decision(tool_name: str, args: dict[str, Any]) -> ConfirmationD
             summary=f"Send the email to {count} recipients",
         )
 
+    if tool_name == "request_sender_id":
+        return ConfirmationDecision(
+            required=True,
+            action=tool_name,
+            summary=f"Request sender ID '{args.get('name') or '(unnamed)'}'",
+        )
+
     return ConfirmationDecision(required=False, action=tool_name, summary="")
 
 
@@ -64,4 +71,8 @@ def confirmation_payload(tool_name: str, args: dict[str, Any]) -> dict[str, Any]
     elif tool_name == "send_email":
         payload["recipients"] = args.get("to") or []
         payload["subject"] = args.get("subject", "")
+    elif tool_name == "request_sender_id":
+        payload["name"] = args.get("name")
+        payload["purpose"] = args.get("purpose")
+        payload["country"] = args.get("country") or "TZ"
     return payload
