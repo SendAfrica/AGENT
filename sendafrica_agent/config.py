@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     agent_webhook_secret: str = ""
     agent_db_path: str = "agent.db"
     agent_allowed_origins: str = "https://app.sendafrica.online,https://app.mailafrica.online"
-    agent_allowed_hosts: str = "api.sendafrica.online,localhost,127.0.0.1"
+    agent_allowed_hosts: str = "api.sendafrica.online,agent.sendafrica.online,localhost,127.0.0.1"
     agent_request_timeout_seconds: float = 45.0
     agent_chat_max_loops: int = 2
     agent_chat_history_limit: int = 30

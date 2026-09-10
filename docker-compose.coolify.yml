@@ -19,6 +19,7 @@ services:
       AGENT_DEFAULT_MODE: ${AGENT_DEFAULT_MODE:?}
       AGENT_HOST: 0.0.0.0
       AGENT_PORT: "8099"
+      AGENT_ALLOWED_HOSTS: ${AGENT_ALLOWED_HOSTS:-api.sendafrica.online,agent.sendafrica.online,localhost,127.0.0.1}
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8099/health || exit 1"]
       interval: 30s
