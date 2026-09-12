@@ -96,6 +96,18 @@ class RequestScopedClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ChatRunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_single_sms_returns_action_preview_without_sending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(str(Path(directory) / "agent.db"))
+            await store.connect()
+            runner = ChatRunner(Settings(ngamia_api_key="test"), FakeSendAfrica(), FakeMailAfrica(), FakeNgamia([
+                {"content": "", "tool_calls": [{"id": "call-1", "name": "send_sms", "arguments": '{"to":"+255700000001","message":"Hi"}'}]}
+            ]), store)
+            result = await runner.handle_user_message("s", "a", "u", "send this")
+            self.assertEqual(result["action"]["type"], "send_sms")
+            self.assertEqual(result["action"]["status"], "awaiting_confirmation")
+            await store.close()
+
     async def test_bulk_action_returns_structured_confirmation_without_sending(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(str(Path(directory) / "agent.db"))

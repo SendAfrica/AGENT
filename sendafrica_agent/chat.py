@@ -24,6 +24,7 @@ _READ_ONLY_TOOLS = {
     "get_account_balance",
     "get_usage_summary",
     "list_contacts",
+    "list_contact_lists",
     "get_delivery_status",
     "list_inbound_emails",
     "get_email_balance",
@@ -99,6 +100,28 @@ TOOL_SCHEMAS = [
         },
     },
     # ---- SMS Tools (SendAfrica) ---------------------------------------------
+    {
+        "type": "function",
+        "function": {
+            "name": "list_contact_lists",
+            "description": "List contact lists available to the authenticated account, including IDs and counts.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "import_contacts",
+            "description": "Import contacts from CSV into an existing contact list. Always requires confirmation.",
+            "parameters": {"type": "object", "properties": {
+                "list_id": {"type": "string", "description": "Existing contact list ID"},
+                "csv_content": {"type": "string", "description": "CSV text to import"},
+                "phone_column": {"type": "string", "description": "Optional phone column header"},
+                "name_column": {"type": "string", "description": "Optional full-name column header"},
+                "confirmed": {"type": "boolean"}
+            }, "required": ["list_id", "csv_content"]},
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -567,6 +590,15 @@ class ChatRunner:
             "status": status,
             "response": response,
             "confirmation_required": confirmation_required_data,
+            "action": (
+                {
+                    "type": confirmation_required_data.get("action", "unknown"),
+                    "status": "awaiting_confirmation",
+                    "preview": confirmation_required_data,
+                }
+                if confirmation_required_data is not None
+                else None
+            ),
             "tool_events": events,
             "iterations": loop_count,
         }
@@ -608,6 +640,18 @@ class ChatRunner:
                 list_id = args.get("list_id") or "1"
                 res = await self.sendafrica.list_contacts(list_id, search=args.get("search"))
                 return {"contacts": res}, False
+
+            elif tool_name == "list_contact_lists":
+                return {"contact_lists": await self.sendafrica.list_contact_lists()}, False
+
+            elif tool_name == "import_contacts":
+                content = str(args.get("csv_content") or "")
+                if not content.strip() or len(content.encode("utf-8")) > 10 * 1024 * 1024:
+                    return {"error": "csv_content_invalid", "message": "CSV content is empty or exceeds 10MB."}, False
+                return await self.sendafrica.import_contacts(
+                    list_id=args["list_id"], csv_content=content,
+                    phone_column=args.get("phone_column"), name_column=args.get("name_column"),
+                ), False
 
             elif tool_name == "get_delivery_status":
                 message_id = str(args.get("message_id") or "").strip()

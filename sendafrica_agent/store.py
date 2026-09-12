@@ -245,3 +245,23 @@ class Store:
                 )
             )
         return messages
+
+    async def get_session_messages_for_identity(self, session_id: str, account_id: str, user_id: str, limit: int = 100) -> list[StoredMessage]:
+        db = self._require_db()
+        cur = await db.execute("SELECT account_id, user_id FROM agent_sessions WHERE id = ?", (session_id,))
+        owner = await cur.fetchone(); await cur.close()
+        if owner is None or owner["account_id"] != account_id or owner["user_id"] != user_id:
+            raise StoreError("session does not belong to this identity")
+        return await self.get_session_messages(session_id, limit)
+
+    async def list_sessions_for_identity(self, account_id: str, user_id: str, limit: int = 30) -> list[dict[str, Any]]:
+        db = self._require_db()
+        bounded_limit = max(1, min(limit, 100))
+        cur = await db.execute("SELECT id, created_at, updated_at FROM agent_sessions WHERE account_id = ? AND user_id = ? ORDER BY updated_at DESC LIMIT ?", (account_id, user_id, bounded_limit))
+        rows = await cur.fetchall(); await cur.close()
+        result = []
+        for row in rows:
+            msg_cur = await db.execute("SELECT content FROM agent_messages WHERE session_id = ? AND role = 'user' ORDER BY id ASC LIMIT 1", (row["id"],))
+            first = await msg_cur.fetchone(); await msg_cur.close()
+            result.append({"session_id": row["id"], "title": (first["content"][:60] if first and first["content"] else "New conversation"), "created_at": row["created_at"], "updated_at": row["updated_at"]})
+        return result

@@ -53,6 +53,9 @@ class SendAfricaClient:
         """Make a request with caller credentials scoped to the current async task."""
         clean_path = path if path.startswith("/") else f"/{path}"
         headers = dict(kwargs.pop("headers", {}) or {})
+        if "files" in kwargs:
+            # Let httpx generate the multipart boundary and content type.
+            headers.pop("Content-Type", None)
         credentials = get_request_credentials()
         if credentials is not None:
             api_key = credentials.api_key
@@ -224,6 +227,22 @@ class SendAfricaClient:
         query = f"?{urlencode({'search': search})}" if search else ""
         res = await self._request("GET", f"/contact-lists/{list_id}/contacts{query}")
         return res if isinstance(res, list) else []
+
+    async def import_contacts(self, list_id: str | int, csv_content: str, phone_column: str | None = None, name_column: str | None = None) -> dict[str, Any]:
+        """Import CSV contacts through the account-scoped multipart API."""
+        data: dict[str, str] = {}
+        if phone_column:
+            data["phone_column"] = phone_column
+        if name_column:
+            data["name_column"] = name_column
+        res = await self._request(
+            "POST",
+            f"/contact-lists/{list_id}/import",
+            data=data,
+            files={"file": ("assistant-import.csv", csv_content.encode("utf-8"), "text/csv")},
+            headers={},
+        )
+        return res if isinstance(res, dict) else {"result": res}
 
     async def create_contact(
         self,

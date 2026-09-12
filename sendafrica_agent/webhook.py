@@ -18,6 +18,7 @@ from .capabilities import SERVICE_VERSION, get_capabilities
 from .config import Settings
 from .mcp_auth import MCPAuthMiddleware
 from .mcp_server import Runtime, build_server
+from .store import StoreError
 
 logger = logging.getLogger("sendafrica_agent.webhook")
 
@@ -120,6 +121,7 @@ def create_app(settings: Settings) -> FastAPI:
                 status_code=401,
                 headers={"X-Request-Id": request_id},
             )
+
         if not account_id:
             return JSONResponse(
                 {"status": "validation_error", "error": "X-Account-ID is required", "request_id": request_id},
@@ -155,6 +157,45 @@ def create_app(settings: Settings) -> FastAPI:
                 status_code=503,
                 headers={"X-Request-Id": request_id},
             )
+
+    @app.get("/v1/agent/sessions/{session_id}")
+    async def session_history(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None),
+        x_account_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default="default_user"),
+    ) -> JSONResponse:
+        account_id = x_account_id or ""
+        credentials = _caller_credentials(authorization, x_api_key, account_id, x_user_id or "default_user")
+        if settings.agent_require_caller_auth and not (credentials.api_key or credentials.authorization):
+            return JSONResponse({"status": "unauthorized", "error": "API key or JWT is required"}, status_code=401)
+        if not account_id:
+            return JSONResponse({"status": "validation_error", "error": "X-Account-ID is required"}, status_code=400)
+        try:
+            with use_request_credentials(credentials):
+                messages = await runtime.store.get_session_messages_for_identity(session_id, account_id, x_user_id or "default_user")
+            return JSONResponse({"session_id": session_id, "messages": [
+                {"role": item.role, "content": item.content, "created_at": item.created_at}
+                for item in messages if item.role in {"user", "assistant"} and item.content
+            ]})
+        except StoreError:
+            return JSONResponse({"status": "not_found", "error": "Session not found"}, status_code=404)
+
+    @app.get("/v1/agent/sessions")
+    async def session_list(
+        authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None),
+        x_account_id: str | None = Header(default=None), x_user_id: str | None = Header(default="default_user"),
+    ) -> JSONResponse:
+        account_id = x_account_id or ""
+        credentials = _caller_credentials(authorization, x_api_key, account_id, x_user_id or "default_user")
+        if settings.agent_require_caller_auth and not (credentials.api_key or credentials.authorization):
+            return JSONResponse({"status": "unauthorized", "error": "API key or JWT is required"}, status_code=401)
+        if not account_id:
+            return JSONResponse({"status": "validation_error", "error": "X-Account-ID is required"}, status_code=400)
+        with use_request_credentials(credentials):
+            sessions = await runtime.store.list_sessions_for_identity(account_id, x_user_id or "default_user")
+        return JSONResponse({"sessions": sessions})
 
     @app.post("/webhooks/sendafrica")
     async def sendafrica_webhook(request: Request) -> JSONResponse:
